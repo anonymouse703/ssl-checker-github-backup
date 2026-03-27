@@ -1,5 +1,6 @@
 /**
- * index.js
+ * index.js for ssl-checker
+ * 
  * Main entry point for domain audit tool
  * Optimized for memory consumption
  */
