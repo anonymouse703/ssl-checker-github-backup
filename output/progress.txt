@@ -1,0 +1,5 @@
+completed=1
+total=2
+last_domain=lagabarde.com
+last_finish=03/25/2026, 10:29:49 AM
+status=✅ lagabarde.com — finished at 03/25/2026, 10:29:49 AM

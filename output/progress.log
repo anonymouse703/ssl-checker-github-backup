@@ -1,0 +1,14 @@
+[10:22:36 AM] Starting audit for: lagabarde.com
+[10:22:38 AM] ✅ sucuri done — CLEAN
+[10:22:38 AM] ✅ pagerank done — PR: 2
+[10:22:43 AM] ✅ server done — IP: 213.186.33.40
+[10:23:00 AM] ✅ pingdom done — Grade: A 100 | Load: 382 ms
+[10:23:05 AM] ✅ pagespeed done — Perf: 68
+[10:23:07 AM] ✅ pingdom done — Grade: C 76 | Load: 4.00 s
+[10:23:28 AM] ✅ pagespeed done — Perf: 15
+[10:23:54 AM] ✅ dns done — 0/1 (0%)
+[10:23:57 AM] ✅ dns done — 0/1 (0%)
+[10:27:08 AM] ✅ ssl done — Grade: A
+[10:27:08 AM] Taking screenshots...
+[10:29:49 AM] Screenshots done — writing CSV...
+[10:29:49 AM] Audit complete — lagabarde.com finished at 03/25/2026, 10:29:49 AM
