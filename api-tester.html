@@ -1,0 +1,514 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>SSL Checker — Live Progress</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 14px;
+        background: #f3f3f3;
+        color: #222;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+      }
+
+      .page-title {
+        font-size: 16px;
+        font-weight: bold;
+        margin: 0 0 10px 0;
+      }
+
+      .panel {
+        background: #ffffff;
+        border: 1px solid #d8d8d8;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
+      }
+
+      .scan-row {
+        line-height: 28px;
+      }
+
+      .muted {
+        color: #666666;
+        font-size: 12px;
+      }
+
+      .domain-pill {
+        display: inline-block;
+        padding: 3px 12px;
+        background: #e8f0fa;
+        color: #185fa5;
+        border-radius: 14px;
+        font-weight: bold;
+        margin-left: 8px;
+        margin-right: 8px;
+      }
+
+      .server-pill {
+        display: inline-block;
+        padding: 3px 12px;
+        background: #f0faf4;
+        color: #1f8b3a;
+        border-radius: 14px;
+        font-weight: bold;
+        margin-left: 8px;
+        margin-right: 4px;
+      }
+
+      .status-pill {
+        display: inline-block;
+        padding: 3px 12px;
+        border-radius: 14px;
+        font-size: 12px;
+        font-weight: bold;
+        background: #185fa5;
+        color: #ffffff;
+      }
+
+      .section-title {
+        font-size: 14px;
+        font-weight: bold;
+        margin: 0 0 10px 0;
+      }
+
+      .status-text {
+        margin-bottom: 6px;
+        color: #4b4b4b;
+      }
+
+      .progress-wrap {
+        position: relative;
+        margin-top: 2px;
+      }
+
+      .progress-bar {
+        width: 100%;
+        height: 9px;
+        background: #dedede;
+        border-radius: 20px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        width: 0%;
+        height: 9px;
+        background: #1f78d1;
+      }
+
+      .progress-fill.done {
+        background: #1f8b3a;
+      }
+
+      .progress-pct {
+        text-align: right;
+        color: #777777;
+        font-size: 11px;
+        margin-top: 4px;
+      }
+
+      .console-label {
+        color: #666666;
+        font-size: 12px;
+        margin-top: 10px;
+        margin-bottom: 6px;
+      }
+
+      .console-box {
+        background: #17191d;
+        color: #f2f2f2;
+        border-radius: 8px;
+        padding: 14px 16px;
+        min-height: 132px;
+        max-height: 700px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .done-banner {
+        display: none;
+        background: #e7f5e8;
+        border: 1px solid #cfe7d1;
+        color: #2e8b57;
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin-bottom: 12px;
+        font-weight: bold;
+      }
+
+      .done-icon {
+        color: #35a853;
+        margin-right: 6px;
+      }
+
+      .results-panel {
+        display: none;
+      }
+
+      .results-grid {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 8px;
+      }
+
+      .metric-cell {
+        background: #f7f7f7;
+        border: 1px solid #ececec;
+        border-radius: 8px;
+        padding: 12px 14px;
+        width: 33.33%;
+        vertical-align: top;
+      }
+
+      .metric-value {
+        font-size: 16px;
+        font-weight: bold;
+        color: #111111;
+        line-height: 1.2;
+        margin-bottom: 4px;
+      }
+
+      .metric-label {
+        font-size: 12px;
+        color: #7b7b7b;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page-title">SSL Checker — Live Progress</div>
+
+    <!-- Server info card -->
+    <div class="panel" style="padding: 10px 18px; margin-bottom: 12px;">
+      <div class="scan-row">
+        <span class="muted">Scanning on server:</span>
+        <span class="server-pill" id="serverNameTag">—</span>
+        <span class="muted" id="serverUrlTag" style="font-size: 11px;"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="scan-row">
+        <span class="muted">Scanning:</span>
+        <span class="domain-pill" id="domainTag"></span>
+        <span class="status-pill" id="scanStatusBadge">Starting...</span>
+      </div>
+    </div>
+
+    <div class="panel" id="progressPanel">
+      <div class="section-title">Live progress</div>
+      <div class="status-text" id="statusText">Waiting...</div>
+
+      <div class="progress-wrap">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-pct" id="pctText">0%</div>
+      </div>
+
+      <div class="console-label">Console log (last 50 lines)</div>
+      <div class="console-box" id="logBox">(waiting for output...)</div>
+    </div>
+
+    <div class="done-banner" id="doneNotice">
+      <span class="done-icon">&#10004;</span>Scan complete! Click FETCH RESULT
+      in FileMaker to save the data.
+    </div>
+
+    <div class="panel results-panel" id="resultCard">
+      <div class="section-title">Quick results</div>
+
+      <table class="results-grid">
+        <tr>
+          <td class="metric-cell">
+            <div class="metric-value" id="m_ssl">N/A</div>
+            <div class="metric-label">SSL Grade</div>
+          </td>
+          <td class="metric-cell">
+            <div class="metric-value" id="m_sucuri">N/A</div>
+            <div class="metric-label">Sucuri</div>
+          </td>
+          <td class="metric-cell">
+            <div class="metric-value" id="m_pagespeed">N/A</div>
+            <div class="metric-label">PageSpeed</div>
+          </td>
+        </tr>
+        <tr>
+          <td class="metric-cell">
+            <div class="metric-value" id="m_pingdom">N/A</div>
+            <div class="metric-label">Pingdom</div>
+          </td>
+          <td class="metric-cell">
+            <div class="metric-value" id="m_dns">N/A</div>
+            <div class="metric-label">DNS</div>
+          </td>
+          <td class="metric-cell">
+            <div class="metric-value" id="m_total">N/A</div>
+            <div class="metric-label">Total time</div>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <script type="text/javascript">
+      (function () {
+        var AUTO_DOMAIN = getQueryParam("domain");
+        var API_BASE = window.location.protocol + "//" + window.location.host;
+        var pollTimer = null;
+        var scanIsDone = false;
+
+        function byId(id) {
+          return document.getElementById(id);
+        }
+
+        function getQueryParam(name) {
+          var qs = window.location.search;
+          var query = "";
+          var parts, i, pair, key, value;
+
+          if (qs && qs.length > 1) {
+            query = qs.substring(1);
+          }
+
+          if (!query) {
+            return "";
+          }
+
+          parts = query.split("&");
+
+          for (i = 0; i < parts.length; i++) {
+            pair = parts[i].split("=");
+            key = decodeURIComponent(pair[0] || "");
+            value = decodeURIComponent((pair[1] || "").replace(/\+/g, " "));
+            if (key === name) {
+              return value;
+            }
+          }
+
+          return "";
+        }
+
+        function escapeHtml(str) {
+          if (str === null || str === undefined) {
+            return "";
+          }
+          return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+        }
+
+        function setText(id, value) {
+          byId(id).innerHTML = escapeHtml(value);
+        }
+
+        function nvl(value, fallback) {
+          if (value === null || value === undefined || value === "") {
+            return fallback;
+          }
+          return value;
+        }
+
+        // Resolve server name — prefers ?server_name= from FileMaker,
+        // falls back to IP/hostname map if opened directly in browser
+        function getServerName() {
+          var fromParam = getQueryParam("server_name");
+          var cleaned = "";
+
+          if (fromParam) {
+            cleaned = String(fromParam).trim();
+
+            cleaned = cleaned.replace(/%20/g, " ");
+            cleaned = cleaned.replace(/^VM\/20([1-9])$/i, "VM $1");
+            cleaned = cleaned.replace(/^VM\/([1-9])$/i, "VM $1");
+
+            return cleaned;
+          }
+
+          return "";
+        }
+
+        function setBadge(done) {
+          var badge = byId("scanStatusBadge");
+          if (done) {
+            badge.style.background = "#185fa5";
+            badge.style.color = "#ffffff";
+            badge.innerHTML = "Done";
+          } else {
+            badge.style.background = "#185fa5";
+            badge.style.color = "#ffffff";
+            badge.innerHTML = "Scanning...";
+          }
+        }
+
+        function xhrGetJson(url, okFn, errFn) {
+          var xhr = new XMLHttpRequest();
+          xhr.open("GET", url, true);
+          xhr.onreadystatechange = function () {
+            var data;
+            if (xhr.readyState === 4) {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  data = JSON.parse(xhr.responseText);
+                  okFn(data);
+                } catch (e) {
+                  if (errFn) {
+                    errFn(e);
+                  }
+                }
+              } else {
+                if (errFn) {
+                  errFn(xhr.status);
+                }
+              }
+            }
+          };
+          xhr.send(null);
+        }
+
+        function formatResultValue(value, fallback) {
+          if (value === null || value === undefined || value === "") {
+            return fallback;
+          }
+          return String(value);
+        }
+
+        function fetchResult(domain) {
+          var url = API_BASE + "/result?domain=" + encodeURIComponent(domain);
+
+          xhrGetJson(
+            url,
+            function (j) {
+              var d;
+              if (j && j.ok && j.data) {
+                d = j.data;
+
+                setText("m_ssl", formatResultValue(d.SSL_Grade, "N/A"));
+                setText("m_sucuri", formatResultValue(d.Sucuri_Overall, "N/A"));
+                setText(
+                  "m_pagespeed",
+                  formatResultValue(d.PageSpeed_Performance, "N/A")
+                );
+                setText("m_pingdom", formatResultValue(d.Pingdom_Grade, "N/A"));
+                setText("m_dns", formatResultValue(d.DNS_Propagation, "N/A"));
+                setText("m_total", formatResultValue(d.Total_Time, "N/A"));
+
+                byId("resultCard").style.display = "block";
+              }
+            },
+            function () {}
+          );
+        }
+
+        function buildConsoleText(statusJson) {
+          var text = "";
+          var logLines = [];
+          var i;
+
+          if (statusJson && statusJson.log_tail) {
+            logLines = String(statusJson.log_tail).split("\n");
+            if (logLines.length > 50) {
+              logLines = logLines.slice(logLines.length - 50);
+            }
+            text = logLines.join("\n");
+          }
+
+          if (!text) {
+            text = "(waiting for output...)";
+          }
+
+          return text;
+        }
+
+        function pollStatus(domain) {
+          var url = API_BASE + "/status?domain=" + encodeURIComponent(domain);
+
+          xhrGetJson(
+            url,
+            function (j) {
+              var pct = 0;
+              var fill;
+
+              if (j && j.pct !== undefined && j.pct !== null) {
+                pct = parseInt(j.pct, 10);
+                if (isNaN(pct)) {
+                  pct = 0;
+                }
+              }
+
+              if (pct < 0) pct = 0;
+              if (pct > 100) pct = 100;
+
+              setText("statusText", nvl(j.status, ""));
+              byId("progressFill").style.width = pct + "%";
+              setText("pctText", pct + "%");
+              byId("logBox").innerHTML = escapeHtml(buildConsoleText(j));
+
+              setBadge(!!j.done);
+
+              if (j.done && !scanIsDone) {
+                scanIsDone = true;
+
+                if (pollTimer) {
+                  clearInterval(pollTimer);
+                  pollTimer = null;
+                }
+
+                fill = byId("progressFill");
+                fill.style.width = "100%";
+                fill.className = "progress-fill done";
+
+                setText("pctText", "100%");
+                setText("statusText", "Scan complete!");
+                byId("doneNotice").style.display = "block";
+
+                if (byId("progressPanel")) {
+                  byId("progressPanel").style.display = "none";
+                }
+
+                fetchResult(domain);
+              }
+            },
+            function () {
+              setText("statusText", "Cannot reach server...");
+            }
+          );
+        }
+
+        function startPolling(domain) {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+
+          pollStatus(domain);
+
+          pollTimer = setInterval(function () {
+            pollStatus(domain);
+          }, 5000);
+        }
+
+        window.onload = function () {
+          // Always show server info card
+          setText("serverNameTag", getServerName());
+          setText("serverUrlTag", API_BASE);
+
+          if (!AUTO_DOMAIN) {
+            setText("domainTag", "No domain supplied");
+            setText("statusText", "Missing ?domain= parameter");
+            return;
+          }
+
+          setText("domainTag", AUTO_DOMAIN);
+          setBadge(false);
+          startPolling(AUTO_DOMAIN);
+        };
+      })();
+    </script>
+  </body>
+</html>

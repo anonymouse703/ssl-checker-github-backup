@@ -99,7 +99,7 @@ async function runSucuri(domain, context) {
     } catch (_) {
       // screenshot failed — non-fatal
     } finally {
-      await tab.close();
+      await tab.close().catch(() => {});
     }
 
     return {

@@ -1,34 +1,7 @@
 "use strict";
 
-/**
- * api-server.js
- *
- * Changes vs original:
- *
- *  1. CONCURRENT JOBS — replaced the single activeScan / activeBatch mutex
- *     with an activeJobs Map keyed by "single:<domain>" or "multi:<batchId>".
- *     15 users scanning 15 different domains now all run in parallel.
- *     Only the same domain at the same time is rejected.
- *
- *  2. PER-JOB PROGRESS FILES — each spawned process gets a unique JOB_ID
- *     env var.  progress.txt is now progress_<JOB_ID>.txt so concurrent scans
- *     never overwrite each other's status.  /status and /multi-status read
- *     the right file via the job entry stored in activeJobs.
- *
- *  3. DOMAIN LOCK FILES — before spawning, the server creates
- *     lock_<domain>.pid in OUTPUT_DIR.  This prevents two concurrent single
- *     scans (or a single + multi scan) from running the same domain at the
- *     same time even if the in-memory check is bypassed on restart.
- *
- *  4. DONE FLAG / LATEST PATH — keyed by JOB_ID so they don't collide.
- *
- *  5. /tester-multi endpoint moved inside handleRequest() (was outside in
- *     original, causing a ReferenceError because url/method were out of scope).
- *
- *  6. FIXED: Added proper cleanup of domain locks when scans complete
- *  7. FIXED: Better error handling for multi-batch domain lock acquisition
- *  8. FIXED: /status endpoint now properly checks done flag before marking as running
- */
+const { loadEnv } = require("./config/env-loader");
+loadEnv();
 
 const http = require("http");
 const fs = require("fs");
@@ -38,24 +11,33 @@ const crypto = require("crypto");
 const { initPool, poolStats } = require("./utils/browser-pool");
 
 // ── Configuration ─────────────────────────────────────────────────────────────
-const PORT = 3000;
-const TOOL_DIR = "/usr/local/ind_leads/ssl-checker-tool";
-const OUTPUT_DIR = "/home/ind/ind_leads_inputs";
-const SCAN_ROOT = "/home/ind";
+const PORT = parseInt(process.env.PORT || "3000", 10);
+const TOOL_DIR = process.env.TOOL_DIR || "/usr/local/ind_leads/ssl-checker-tool";
+const OUTPUT_DIR = process.env.OUTPUT_DIR || "/home/ind/ind_leads_inputs";
+const SCAN_ROOT = process.env.SCAN_ROOT || "/home/ind";
+
+if (!TOOL_DIR) {
+  console.error("[api] ERROR: TOOL_DIR is not set");
+  process.exit(1);
+}
+
+if (!OUTPUT_DIR) {
+  console.error("[api] ERROR: OUTPUT_DIR is not set");
+  process.exit(1);
+}
+
+console.log(`[api] Configuration:`);
+console.log(`[api]   PORT: ${PORT}`);
+console.log(`[api]   TOOL_DIR: ${TOOL_DIR}`);
+console.log(`[api]   OUTPUT_DIR: ${OUTPUT_DIR}`);
+console.log(`[api]   SCAN_ROOT: ${SCAN_ROOT}`);
 
 const API_BATCH_DIR = path.join(OUTPUT_DIR, "api_batches");
 const MAX_ACTIVE_RESERVED_DOMAINS = parseInt(
   process.env.MAX_ACTIVE_RESERVED_DOMAINS || "6",
-  10,
+  10
 );
 
-// ── Active runtime state ──────────────────────────────────────────────────────
-// Map key: "single:<domain>"  or  "multi:<batchId>"
-// Value:   job descriptor object (see createJobEntry helpers below)
-//
-// Multiple single scans for DIFFERENT domains run concurrently.
-// The same domain cannot be scanned twice at the same time.
-// Multiple multi-batches can also run concurrently (different batch IDs).
 const activeJobs = new Map();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -79,7 +61,7 @@ function jsonResponse(res, statusCode, data) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
     "Access-Control-Allow-Headers": "Content-Type",
     "Content-Length": Buffer.byteLength(body),
   });
@@ -128,12 +110,19 @@ function nowIso() {
 }
 
 function sanitizeDomain(raw) {
-  return String(raw || "")
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//i, "")
-    .replace(/^www\./i, "")
-    .replace(/\/+$/, "");
+  let s = String(raw || "").trim().toLowerCase();
+
+  s = s.replace(/^https?:\/\//i, "");
+  s = s.replace(/^www\./i, "");
+
+  s = s.split("/")[0];
+  s = s.split("?")[0];
+  s = s.split("#")[0];
+
+  s = s.replace(/:\d+$/, "");   // remove :8080 if present
+  s = s.replace(/\.+$/, "");    // remove trailing dots
+
+  return s;
 }
 
 function uniqueDomains(list) {
@@ -158,11 +147,6 @@ function createBatchId() {
   return `batch_${ts}_${rnd}`;
 }
 
-/**
- * Create a unique JOB_ID for a single-domain scan.
- * Format: <domain>_<timestamp>_<rand4>
- * The domain part makes progress files easy to identify when browsing the dir.
- */
 function createJobId(domain) {
   const safe = domain.replace(/[^a-z0-9._-]/gi, "_").slice(0, 40);
   const rnd = crypto.randomBytes(2).toString("hex");
@@ -190,29 +174,23 @@ function batchMetaPath(batchId) {
   return path.join(API_BATCH_DIR, `${batchId}.json`);
 }
 
-// ── Domain lock file helpers ──────────────────────────────────────────────────
-// Cross-process mutex for the same domain.  The lock file contains the PID
-// of the process that owns it.  On process exit (or explicit release) the
-// file is removed.  Stale locks (PID no longer alive) are automatically
-// broken so a server restart doesn't permanently block a domain.
+// ── Domain lock helpers ───────────────────────────────────────────────────────
 
 function tryAcquireDomainLock(domain, pid) {
   const lockFile = domainLockPath(domain);
   try {
     fs.writeFileSync(lockFile, String(pid), { flag: "wx" });
     console.log(`[lock] Acquired lock for ${domain} (PID: ${pid})`);
-    return true; // we got it
+    return true;
   } catch (e) {
     if (e.code !== "EEXIST") throw e;
-    // Lock exists — check if the owning PID is still alive
     try {
       const ownerPid = parseInt(readFileOrNull(lockFile) || "0", 10);
       try {
         process.kill(ownerPid, 0);
         console.log(`[lock] Lock for ${domain} held by alive PID ${ownerPid}`);
-        return false; // still alive — cannot take the lock
+        return false;
       } catch (_) {
-        // Dead PID — stale lock, take it over
         console.log(`[lock] Stale lock for ${domain} (PID ${ownerPid} dead), taking over`);
         fs.writeFileSync(lockFile, String(pid), { flag: "w" });
         return true;
@@ -238,8 +216,9 @@ function currentReservedDomainCount() {
   let count = 0;
   for (const job of activeJobs.values()) {
     if (job.type === "single" && job.domain) count += 1;
-    else if (job.type === "multi" && Array.isArray(job.domains))
+    else if (job.type === "multi" && Array.isArray(job.domains)) {
       count += job.domains.length;
+    }
   }
   return count;
 }
@@ -265,12 +244,12 @@ function releaseBatchDomainLocks(domains, pid) {
   for (const domain of domains || []) releaseDomainLock(domain, pid);
 }
 
-// ── Progress file helpers ─────────────────────────────────────────────────────
+// ── Progress helpers ──────────────────────────────────────────────────────────
 
 function initJobProgressFile(jobId, domain, total) {
   writeTextSafe(
     progressFilePath(jobId),
-    `completed=0\ntotal=${total}\nlast_domain=${domain}\nlast_finish=\nstatus=STARTING\njob_id=${jobId}\ndomain=${domain}`,
+    `completed=0\ntotal=${total}\nlast_domain=${domain}\nlast_finish=\nstatus=STARTING\njob_id=${jobId}\ndomain=${domain}`
   );
   writeTextSafe(logFilePath(jobId), "");
 }
@@ -302,12 +281,14 @@ function parseCSV(raw) {
     .split("\n")
     .map((l) => l.replace(/\r/g, ""))
     .filter((l) => l.trim());
+
   if (lines.length < 2) return [];
 
   function parseLine(line) {
     const cols = [];
     let cur = "";
     let inQuotes = false;
+
     for (let i = 0; i < line.length; i++) {
       const ch = line[i];
       if (inQuotes) {
@@ -315,16 +296,24 @@ function parseCSV(raw) {
           if (line[i + 1] === '"') {
             cur += '"';
             i++;
-          } else inQuotes = false;
-        } else cur += ch;
+          } else {
+            inQuotes = false;
+          }
+        } else {
+          cur += ch;
+        }
       } else {
-        if (ch === '"') inQuotes = true;
-        else if (ch === ",") {
+        if (ch === '"') {
+          inQuotes = true;
+        } else if (ch === ",") {
           cols.push(cur);
           cur = "";
-        } else cur += ch;
+        } else {
+          cur += ch;
+        }
       }
     }
+
     cols.push(cur);
     return cols;
   }
@@ -340,33 +329,207 @@ function parseCSV(raw) {
   });
 }
 
-// ── Domain CSV lookup ─────────────────────────────────────────────────────────
+// ── Result lookup helpers ─────────────────────────────────────────────────────
 
 function findLatestDomainCSV(domain) {
   let bestMtime = 0;
   let bestPath = null;
 
+  console.log(`[api] Looking for direct result files for domain: ${domain}`);
+
   try {
     const entries = fs.readdirSync(SCAN_ROOT);
     for (const entry of entries) {
       if (!/^\d{4}-\d{2}-\d{2}/.test(entry)) continue;
-      const csvPath = path.join(
-        SCAN_ROOT,
-        entry,
-        domain,
-        `${domain}_results.csv`,
-      );
-      if (fs.existsSync(csvPath)) {
-        const mtime = fs.statSync(csvPath).mtimeMs;
+
+      const batchPath = path.join(SCAN_ROOT, entry);
+      const candidates = [
+        path.join(batchPath, domain, "summary.csv"),
+        path.join(batchPath, domain, `${domain}_results.csv`),
+        path.join(batchPath, `${domain}_results.csv`),
+      ];
+
+      for (const candidate of candidates) {
+        if (!fs.existsSync(candidate)) continue;
+        const mtime = fs.statSync(candidate).mtimeMs;
+        console.log(`[api] Found candidate: ${candidate}`);
         if (mtime > bestMtime) {
           bestMtime = mtime;
-          bestPath = csvPath;
+          bestPath = candidate;
         }
       }
     }
-  } catch (_) {}
+  } catch (err) {
+    console.error(`[api] Error scanning direct result files: ${err.message}`);
+  }
+
+  if (bestPath) {
+    console.log(`[api] Best direct result file: ${bestPath}`);
+  } else {
+    console.log(`[api] No direct result file found for domain: ${domain}`);
+  }
 
   return bestPath;
+}
+
+function findLatestDomainInBatchSummary(domain) {
+  let bestMtime = 0;
+  let bestPath = null;
+  let bestRow = null;
+
+  console.log(`[api] Looking for domain in batch summary.csv: ${domain}`);
+
+  try {
+    const entries = fs.readdirSync(SCAN_ROOT);
+    for (const entry of entries) {
+      if (!/^\d{4}-\d{2}-\d{2}/.test(entry)) continue;
+
+      const batchPath = path.join(SCAN_ROOT, entry);
+      const summaryPath = path.join(batchPath, "summary.csv");
+      if (!fs.existsSync(summaryPath)) continue;
+
+      const raw = readFileOrNull(summaryPath);
+      if (!raw) continue;
+
+      const rows = parseCSV(raw);
+      const row = rows.find((r) => sanitizeDomain(r.Domain || "") === domain);
+      if (!row) continue;
+
+      const mtime = fs.statSync(summaryPath).mtimeMs;
+      if (mtime > bestMtime) {
+        bestMtime = mtime;
+        bestPath = summaryPath;
+        bestRow = row;
+      }
+    }
+  } catch (err) {
+    console.error(`[api] Error scanning batch summary CSVs: ${err.message}`);
+  }
+
+  if (bestPath) {
+    console.log(`[api] Best batch summary hit: ${bestPath}`);
+    return { path: bestPath, row: bestRow };
+  }
+
+  console.log(`[api] No batch summary hit found for domain: ${domain}`);
+  return null;
+}
+
+function findDomainFromLatestPathFiles(domain) {
+  let bestMtime = 0;
+  let bestPath = null;
+  let bestRow = null;
+
+  console.log(`[api] Looking for domain via latest_path_*.txt: ${domain}`);
+
+  try {
+    const files = fs.readdirSync(OUTPUT_DIR).filter((f) => /^latest_path_.+\.txt$/.test(f));
+
+    for (const file of files) {
+      const fullPath = path.join(OUTPUT_DIR, file);
+
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch (_) {
+        continue;
+      }
+
+      const pointedPath = (readFileOrNull(fullPath) || "").trim();
+      if (!pointedPath) continue;
+      if (!fs.existsSync(pointedPath)) continue;
+
+      const raw = readFileOrNull(pointedPath);
+      if (!raw) continue;
+
+      const rows = parseCSV(raw);
+      const row = rows.find((r) => sanitizeDomain(r.Domain || "") === domain);
+      if (!row) continue;
+
+      if (stat.mtimeMs > bestMtime) {
+        bestMtime = stat.mtimeMs;
+        bestPath = pointedPath;
+        bestRow = row;
+      }
+    }
+  } catch (err) {
+    console.error(`[api] Error scanning latest_path files: ${err.message}`);
+  }
+
+  if (bestPath) {
+    console.log(`[api] Found via latest_path file: ${bestPath}`);
+    return { path: bestPath, row: bestRow, source: "latest_path_file" };
+  }
+
+  console.log(`[api] No latest_path file hit found for domain: ${domain}`);
+  return null;
+}
+
+function walkDirRecursive(rootDir, visitFile) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(rootDir, { withFileTypes: true });
+  } catch (_) {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      walkDirRecursive(fullPath, visitFile);
+    } else if (entry.isFile()) {
+      visitFile(fullPath);
+    }
+  }
+}
+
+function findDomainByRecursiveSearch(domain) {
+  let bestMtime = 0;
+  let bestPath = null;
+  let bestRow = null;
+
+  console.log(`[api] Looking for domain via recursive search: ${domain}`);
+
+  try {
+    walkDirRecursive(SCAN_ROOT, (fullPath) => {
+      const base = path.basename(fullPath);
+      const isCandidate =
+        base === "summary.csv" ||
+        base === `${domain}_results.csv`;
+
+      if (!isCandidate) return;
+
+      const raw = readFileOrNull(fullPath);
+      if (!raw) return;
+
+      const rows = parseCSV(raw);
+      const row = rows.find((r) => sanitizeDomain(r.Domain || "") === domain);
+      if (!row) return;
+
+      let mtime = 0;
+      try {
+        mtime = fs.statSync(fullPath).mtimeMs;
+      } catch (_) {
+        return;
+      }
+
+      if (mtime > bestMtime) {
+        bestMtime = mtime;
+        bestPath = fullPath;
+        bestRow = row;
+      }
+    });
+  } catch (err) {
+    console.error(`[api] Error in recursive search: ${err.message}`);
+  }
+
+  if (bestPath) {
+    console.log(`[api] Found via recursive search: ${bestPath}`);
+    return { path: bestPath, row: bestRow, source: "recursive_search" };
+  }
+
+  console.log(`[api] No recursive search hit found for domain: ${domain}`);
+  return null;
 }
 
 function findNewestBatchPathAfter(startedAtIso) {
@@ -384,10 +547,12 @@ function findNewestBatchPathAfter(startedAtIso) {
       if (!fs.existsSync(statsPath) && !fs.existsSync(summaryPath)) continue;
 
       let mtime = 0;
-      if (fs.existsSync(statsPath))
+      if (fs.existsSync(statsPath)) {
         mtime = Math.max(mtime, fs.statSync(statsPath).mtimeMs);
-      if (fs.existsSync(summaryPath))
+      }
+      if (fs.existsSync(summaryPath)) {
         mtime = Math.max(mtime, fs.statSync(summaryPath).mtimeMs);
+      }
 
       if (mtime >= startedAtMs && mtime > bestMtime) {
         bestMtime = mtime;
@@ -405,6 +570,77 @@ function tailFile(filePath, maxLines) {
     .filter((l) => l.trim())
     .slice(-maxLines)
     .join("\n");
+}
+
+// ── Cleanup helper files older than X hours ──────────────────────────────────
+
+function cleanupOldApiHelperFiles(maxAgeHours = 24) {
+  const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
+  const deleted = [];
+  const skipped = [];
+  const errors = [];
+
+  const activeJobIds = new Set(
+    [...activeJobs.values()].map((j) => j.jobId).filter(Boolean)
+  );
+
+  function extractJobId(file) {
+    let m = file.match(/^done_(.+)\.flag$/);
+    if (m) return m[1];
+    m = file.match(/^latest_path_(.+)\.txt$/);
+    if (m) return m[1];
+    m = file.match(/^progress_(.+)\.txt$/);
+    if (m) return m[1];
+    m = file.match(/^progress_(.+)\.log$/);
+    if (m) return m[1];
+    return null;
+  }
+
+  try {
+    const files = fs.readdirSync(OUTPUT_DIR);
+
+    for (const file of files) {
+      const jobId = extractJobId(file);
+      if (!jobId) continue;
+
+      if (activeJobIds.has(jobId)) {
+        skipped.push(file);
+        continue;
+      }
+
+      const fullPath = path.join(OUTPUT_DIR, file);
+
+      try {
+        const stat = fs.statSync(fullPath);
+        if (!stat.isFile()) continue;
+
+        if (stat.mtimeMs < cutoff) {
+          fs.unlinkSync(fullPath);
+          deleted.push(file);
+        } else {
+          skipped.push(file);
+        }
+      } catch (e) {
+        errors.push({ file, error: e.message });
+      }
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      error: e.message,
+      deleted,
+      skipped,
+      errors,
+    };
+  }
+
+  return {
+    ok: true,
+    deleted,
+    skipped,
+    errors,
+    cutoff_iso: new Date(cutoff).toISOString(),
+  };
 }
 
 // ── Body parser ───────────────────────────────────────────────────────────────
@@ -425,20 +661,20 @@ function parseBodyJson(req, callback) {
   });
 }
 
-// ── PUPPETEER PATH ────────────────────────────────────────────────────────────
-
 const PUPPETEER_PATH =
+  process.env.PUPPETEER_EXECUTABLE_PATH ||
   "/usr/local/ind_leads/ssl-checker-tool/chrome/linux-145.0.7632.67/chrome-linux64/chrome";
 
-// ── Request router ────────────────────────────────────────────────────────────
+// ── Cleanup hooks ─────────────────────────────────────────────────────────────
 
 function cleanupServerOwnedLocks() {
   console.log("[api] Cleaning up domain locks owned by this server...");
   for (const job of activeJobs.values()) {
-    if (job.type === "single" && job.domain)
+    if (job.type === "single" && job.domain) {
       releaseDomainLock(job.domain, process.pid);
-    else if (job.type === "multi")
+    } else if (job.type === "multi") {
       releaseBatchDomainLocks(job.domains, process.pid);
+    }
   }
 }
 
@@ -452,45 +688,35 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 
-// ── Stale job cleanup ─────────────────────────────────────────────────────────
-// Kills and removes jobs that have been running longer than maxAgeMs.
-// Called automatically every 30 minutes and also via DELETE /jobs/stale.
-
-const STALE_JOB_MAX_AGE_MS = parseInt(
-  process.env.STALE_JOB_MAX_AGE_HOURS || "2",
-  10,
-) * 60 * 60 * 1000;
+const STALE_JOB_MAX_AGE_MS =
+  parseInt(process.env.STALE_JOB_MAX_AGE_HOURS || "2", 10) *
+  60 * 60 * 1000;
 
 function purgeStaleJobs(maxAgeMs) {
   const now = Date.now();
   const killed = [];
-  const skipped = [];
 
   for (const [key, job] of activeJobs.entries()) {
     const age = now - new Date(job.startedAt).getTime();
     if (age < maxAgeMs) continue;
 
     console.log(
-      `[stale] Job ${key} started ${job.startedAt} (${Math.round(age / 60000)} min ago) — killing PID ${job.pid}`,
+      `[stale] Job ${key} started ${job.startedAt} (${Math.round(age / 60000)} min ago) — killing PID ${job.pid}`
     );
 
-    // Kill the child process
     try {
       process.kill(job.pid, "SIGKILL");
       console.log(`[stale] Killed PID ${job.pid} for job ${key}`);
     } catch (e) {
-      // Already dead — that's fine, still clean up
       console.log(`[stale] PID ${job.pid} already gone (${e.code})`);
     }
 
-    // Release domain lock
     if (job.type === "single" && job.domain) {
       releaseDomainLock(job.domain, job.pid);
     } else if (job.type === "multi" && Array.isArray(job.domains)) {
       releaseBatchDomainLocks(job.domains, job.pid);
     }
 
-    // Remove from active jobs
     activeJobs.delete(key);
 
     killed.push({
@@ -508,31 +734,39 @@ function purgeStaleJobs(maxAgeMs) {
     console.log(`[stale] Purged ${killed.length} stale job(s)`);
   }
 
-  return { killed, skipped };
+  return { killed };
 }
 
-// Auto-cleanup every 30 minutes
 const STALE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 setInterval(() => {
   console.log("[stale] Running scheduled stale job cleanup...");
   purgeStaleJobs(STALE_JOB_MAX_AGE_MS);
-}, STALE_CLEANUP_INTERVAL_MS).unref(); // .unref() so this timer doesn't keep the process alive alone
+}, STALE_CLEANUP_INTERVAL_MS).unref();
+
+const API_HELPER_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+setInterval(() => {
+  const result = cleanupOldApiHelperFiles(24);
+  if (result.ok && result.deleted.length > 0) {
+    console.log(`[cleanup] deleted ${result.deleted.length} old API helper files older than 24h`);
+  }
+}, API_HELPER_CLEANUP_INTERVAL_MS).unref();
+
+// ── Router ────────────────────────────────────────────────────────────────────
 
 function handleRequest(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const method = req.method.toUpperCase();
 
-  // CORS preflight
   if (method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
       "Access-Control-Allow-Headers": "Content-Type",
     });
     return res.end();
   }
 
-  // ── GET /health ─────────────────────────────────────────────────────────────
+  // Health check
   if (method === "GET" && url.pathname === "/health") {
     const jobs = [...activeJobs.values()].map((j) => ({
       key: j.key,
@@ -543,6 +777,7 @@ function handleRequest(req, res) {
       startedAt: j.startedAt,
       jobId: j.jobId || null,
     }));
+
     return jsonResponse(res, 200, {
       ok: true,
       server: "ssl-checker-tool api",
@@ -556,36 +791,32 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── POST /scan ──────────────────────────────────────────────────────────────
+  // Single domain scan
   if (method === "POST" && url.pathname === "/scan") {
     return parseBodyJson(req, (err, parsed) => {
       if (err) return jsonResponse(res, 400, { ok: false, error: err.message });
 
       const domain = sanitizeDomain(parsed.domain);
-      if (!domain)
+      if (!domain) {
         return jsonResponse(res, 400, {
           ok: false,
           error: "domain is required",
         });
+      }
 
       const jobKey = `single:${domain}`;
 
-      // Check if already running in memory
       if (activeJobs.has(jobKey)) {
         const existing = activeJobs.get(jobKey);
-
-        // ✅ ALWAYS check done flag FIRST — if the scan finished, clean up and allow re-scan
-        // regardless of whether the PID is still alive (PIDs can be reused by the OS)
         const alreadyDone = fs.existsSync(existing.doneFlag);
+
         if (alreadyDone) {
-          console.log(`[api] Job for ${domain} is done (done flag exists), clearing from activeJobs to allow re-scan`);
+          console.log(`[api] Job for ${domain} is done, clearing from activeJobs to allow re-scan`);
           releaseDomainLock(domain, existing.pid);
           activeJobs.delete(jobKey);
         } else {
-          // Done flag not present — check if the process is actually still alive
           try {
             process.kill(existing.pid, 0);
-            // Process is alive AND not done — genuinely still running, reject
             return jsonResponse(res, 200, {
               ok: false,
               error: `Scan already running for ${domain}. Poll /status?domain=${domain} for progress.`,
@@ -594,7 +825,6 @@ function handleRequest(req, res) {
               pid: existing.pid,
             });
           } catch (_) {
-            // Process is dead and no done flag — crashed, clean up and allow re-scan
             console.log(`[api] Cleaning up crashed job for ${domain} (PID ${existing.pid})`);
             releaseDomainLock(domain, existing.pid);
             activeJobs.delete(jobKey);
@@ -602,23 +832,6 @@ function handleRequest(req, res) {
         }
       }
 
-      // ✅ MODIFIED: Allow immediate re-scans - only clean up old flags, don't block
-      const possibleJobId = createJobId(domain);
-      const possibleDoneFlag = doneFlagPath(possibleJobId);
-      if (fs.existsSync(possibleDoneFlag)) {
-        // Clean up old done flags to prevent accumulation (optional)
-        const doneTime = fs.statSync(possibleDoneFlag).mtimeMs;
-        if (Date.now() - doneTime > 60 * 60 * 1000) { // Older than 1 hour
-          try {
-            fs.unlinkSync(possibleDoneFlag);
-            console.log(`[api] Cleaned up old done flag for ${domain}`);
-          } catch (_) {}
-        }
-        // ✅ Allow re-scan immediately - no blocking
-        console.log(`[api] Allowing re-scan for ${domain} (last scan at ${new Date(doneTime).toISOString()})`);
-      }
-
-      // Cross-process domain lock guard
       const lockAcquired = tryAcquireDomainLock(domain, process.pid);
       if (!lockAcquired) {
         return jsonResponse(res, 200, {
@@ -645,11 +858,8 @@ function handleRequest(req, res) {
         },
       });
 
-      // Update lock file with actual child PID
       try {
-        fs.writeFileSync(domainLockPath(domain), String(child.pid), {
-          flag: "w",
-        });
+        fs.writeFileSync(domainLockPath(domain), String(child.pid), { flag: "w" });
       } catch (_) {}
 
       const jobEntry = {
@@ -665,28 +875,15 @@ function handleRequest(req, res) {
       };
       activeJobs.set(jobKey, jobEntry);
 
-      console.log(
-        `[api] single scan started: ${domain} (pid ${child.pid}) jobId=${jobId}`,
-      );
+      console.log(`[api] single scan started: ${domain} (pid ${child.pid}) jobId=${jobId}`);
 
-      // ✅ Use a write stream instead of appendFileSync on every data event.
-      // appendTextSafe calls fs.appendFileSync synchronously per chunk — with a
-      // long-running scan that can be hundreds of blocking writes.  A single
-      // createWriteStream buffers internally and flushes in larger batches,
-      // reducing both CPU and memory churn.
       const logStream = fs.createWriteStream(logFilePath(jobId), { flags: "a" });
       child.stdout.pipe(logStream);
-      child.stderr.on("data", (data) =>
-        logStream.write("[stderr] " + String(data)),
-      );
+      child.stderr.on("data", (data) => logStream.write("[stderr] " + String(data)));
 
       child.on("close", (code) => {
         logStream.end();
-        console.log(
-          `[api] single scan finished: ${domain} exit=${code} jobId=${jobId}`,
-        );
-        // ✅ Always write done flag on close so the re-scan check can detect completion
-        // even if the child script didn't write it (e.g. crashed or exited early)
+        console.log(`[api] single scan finished: ${domain} exit=${code} jobId=${jobId}`);
         writeTextSafe(doneFlagPath(jobId), `exit=${code}\nfinishedAt=${nowIso()}`);
         releaseDomainLock(domain, child.pid);
         activeJobs.delete(jobKey);
@@ -713,11 +910,14 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── GET /status?domain=example.com ─────────────────────────────────────────
+  // Single domain status
   if (method === "GET" && url.pathname === "/status") {
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
     if (!domain) {
-      return jsonResponse(res, 400, { ok: false, error: "domain parameter required" });
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "domain parameter required",
+      });
     }
 
     const jobKey = `single:${domain}`;
@@ -731,20 +931,17 @@ function handleRequest(req, res) {
       progress = readProgress(jobId);
       isDone = fs.existsSync(job.doneFlag);
     } else {
-      // Server may have restarted — look for the newest done/progress file for this domain
       try {
         const safeDomain = domain.replace(/[^a-z0-9._-]/gi, "_");
         const files = fs
           .readdirSync(OUTPUT_DIR)
-          .filter(
-            (f) =>
-              f.startsWith(`progress_${safeDomain}`) && f.endsWith(".txt"),
-          )
+          .filter((f) => f.startsWith(`progress_${safeDomain}`) && f.endsWith(".txt"))
           .map((f) => ({
             f,
             mtime: fs.statSync(path.join(OUTPUT_DIR, f)).mtimeMs,
           }))
           .sort((a, b) => b.mtime - a.mtime);
+
         if (files.length > 0) {
           const fname = files[0].f;
           jobId = fname.replace(/^progress_/, "").replace(/\.txt$/, "");
@@ -763,25 +960,20 @@ function handleRequest(req, res) {
       const total = parseInt(progress.total || "1", 10);
       pct = total > 0 ? Math.round((completed / total) * 100) : 0;
       statusText = progress.status || "Running...";
-      
-      // Check if it's actually running vs completed
+
       if (isDone) {
         statusText = "Audit complete";
         isRunning = false;
       } else if (activeJobs.has(jobKey)) {
         isRunning = true;
-        // Check if process is actually alive
         try {
           process.kill(activeJobs.get(jobKey).pid, 0);
         } catch (_) {
-          // Process is dead but job still in activeJobs - cleanup
           console.log(`[api] Cleaning up stale job entry for ${domain}`);
           activeJobs.delete(jobKey);
           isRunning = false;
           statusText = "Scan was interrupted";
         }
-      } else {
-        isRunning = false;
       }
     }
 
@@ -801,14 +993,15 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── GET /result?domain=example.com ─────────────────────────────────────────
+  // Single domain result
   if (method === "GET" && url.pathname === "/result") {
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
-    if (!domain)
+    if (!domain) {
       return jsonResponse(res, 400, {
         ok: false,
         error: "domain parameter required",
       });
+    }
 
     const csvPath = findLatestDomainCSV(domain);
     if (csvPath) {
@@ -818,16 +1011,50 @@ function handleRequest(req, res) {
         const row =
           rows.find((r) => sanitizeDomain(r.Domain || "") === domain) ||
           rows[rows.length - 1];
+
         if (row) {
           return jsonResponse(res, 200, {
             ok: true,
             mode: "single",
-            source: "domain_csv",
+            source: csvPath.endsWith("/summary.csv") ? "domain_summary_csv" : "domain_csv",
             path: csvPath,
             data: row,
           });
         }
       }
+    }
+
+    const summaryHit = findLatestDomainInBatchSummary(domain);
+    if (summaryHit) {
+      return jsonResponse(res, 200, {
+        ok: true,
+        mode: "single",
+        source: "batch_summary_csv",
+        path: summaryHit.path,
+        data: summaryHit.row,
+      });
+    }
+
+    const latestPathHit = findDomainFromLatestPathFiles(domain);
+    if (latestPathHit) {
+      return jsonResponse(res, 200, {
+        ok: true,
+        mode: "single",
+        source: latestPathHit.source,
+        path: latestPathHit.path,
+        data: latestPathHit.row,
+      });
+    }
+
+    const recursiveHit = findDomainByRecursiveSearch(domain);
+    if (recursiveHit) {
+      return jsonResponse(res, 200, {
+        ok: true,
+        mode: "single",
+        source: recursiveHit.source,
+        path: recursiveHit.path,
+        data: recursiveHit.row,
+      });
     }
 
     return jsonResponse(res, 404, {
@@ -837,7 +1064,7 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── POST /multi-scan ────────────────────────────────────────────────────────
+  // Multi-scan
   if (method === "POST" && url.pathname === "/multi-scan") {
     return parseBodyJson(req, (err, parsed) => {
       if (err) return jsonResponse(res, 400, { ok: false, error: err.message });
@@ -850,13 +1077,11 @@ function handleRequest(req, res) {
         });
       }
 
-      const conflictingInMemory = domains.filter((d) =>
-        activeJobs.has(`single:${d}`),
-      );
+      const conflictingInMemory = domains.filter((d) => activeJobs.has(`single:${d}`));
       if (conflictingInMemory.length > 0) {
         return jsonResponse(res, 200, {
           ok: false,
-          error: `These domains are already being scanned: ${conflictingInMemory.join(", ")}. Wait for them to finish or exclude them.`,
+          error: `These domains are already being scanned: ${conflictingInMemory.join(", ")}.`,
           conflicting_domains: conflictingInMemory,
         });
       }
@@ -865,27 +1090,27 @@ function handleRequest(req, res) {
       if (reservedNow + domains.length > MAX_ACTIVE_RESERVED_DOMAINS) {
         return jsonResponse(res, 429, {
           ok: false,
-          error: `Server is busy. This batch needs ${domains.length} slots, but only ${Math.max(0, MAX_ACTIVE_RESERVED_DOMAINS - reservedNow)} of ${MAX_ACTIVE_RESERVED_DOMAINS} are available.`,
+          error: `Server is busy. This batch needs ${domains.length} slots, but only ${Math.max(
+            0,
+            MAX_ACTIVE_RESERVED_DOMAINS - reservedNow
+          )} of ${MAX_ACTIVE_RESERVED_DOMAINS} are available.`,
           requested_domains: domains.length,
           reserved_domains: reservedNow,
           max_reserved_domains: MAX_ACTIVE_RESERVED_DOMAINS,
         });
       }
 
-      const { conflicts: lockedConflicts } = acquireBatchDomainLocks(
-        domains,
-        process.pid,
-      );
+      const { conflicts: lockedConflicts } = acquireBatchDomainLocks(domains, process.pid);
       if (lockedConflicts.length > 0) {
         return jsonResponse(res, 200, {
           ok: false,
-          error: `These domains are locked by another process: ${lockedConflicts.join(", ")}. Wait for them to finish or exclude them.`,
+          error: `These domains are locked by another process: ${lockedConflicts.join(", ")}.`,
           conflicting_domains: lockedConflicts,
         });
       }
 
       const batchId = createBatchId();
-      const jobId = batchId; // parent batch progress job
+      const jobId = batchId;
       const startedAt = nowIso();
       const batchLogPath = path.join(API_BATCH_DIR, `${batchId}.log`);
 
@@ -943,10 +1168,6 @@ function handleRequest(req, res) {
       meta.pid = child.pid;
       saveBatchMeta(meta);
 
-      console.log(
-        `[api] multi batch started: ${batchId} (${domains.length} domains, pid ${child.pid})`,
-      );
-
       function processBatchOutput(chunk, isErr) {
         const text = String(chunk || "");
         appendTextSafe(batchLogPath, isErr ? "[stderr] " + text : text);
@@ -954,39 +1175,27 @@ function handleRequest(req, res) {
         for (const line of text.split("\n")) {
           const t = line.trim();
           if (!t) continue;
+
           let m = t.match(/^__BATCH_FOLDER__:(.+)$/);
           if (m && activeJobs.has(jobKey)) {
             const entry = activeJobs.get(jobKey);
             entry.batchFolder = m[1].trim();
             entry.batchPath = path.join(SCAN_ROOT, entry.batchFolder);
           }
+
           m = t.match(/^__DOMAIN_START__:(.+?):(\d+):(.*)$/);
           if (m && activeJobs.has(jobKey)) {
             const entry = activeJobs.get(jobKey);
             const domain = m[1].trim();
-            if (!entry.activeDomains.includes(domain))
+            if (!entry.activeDomains.includes(domain)) {
               entry.activeDomains.push(domain);
+            }
           }
+
           m = t.match(/^__DOMAIN_DONE__:(.+?):(\d+)$/);
           if (m && activeJobs.has(jobKey)) {
             const entry = activeJobs.get(jobKey);
-            entry.activeDomains = entry.activeDomains.filter(
-              (d) => d !== m[1].trim(),
-            );
-          }
-          m = t.match(/Batch folder\s*:\s*([^\s/]+)\/?$/i);
-          if (m && activeJobs.has(jobKey)) {
-            const entry = activeJobs.get(jobKey);
-            entry.batchFolder = m[1];
-            entry.batchPath = path.join(SCAN_ROOT, m[1]);
-          }
-          m = t.match(/\/home\/ind\/([^/]+)\/?$/i);
-          if (m && activeJobs.has(jobKey)) {
-            const entry = activeJobs.get(jobKey);
-            if (!entry.batchFolder) {
-              entry.batchFolder = m[1];
-              entry.batchPath = path.join(SCAN_ROOT, m[1]);
-            }
+            entry.activeDomains = entry.activeDomains.filter((d) => d !== m[1].trim());
           }
         }
       }
@@ -995,8 +1204,6 @@ function handleRequest(req, res) {
       child.stderr.on("data", (data) => processBatchOutput(data, true));
 
       child.on("close", (code) => {
-        console.log(`[api] multi batch finished: ${batchId} exit=${code}`);
-
         const entry = activeJobs.get(jobKey);
         const currentMeta = getBatchMeta(batchId) || meta;
         const guessedBatchPath =
@@ -1031,8 +1238,7 @@ function handleRequest(req, res) {
         activeJobs.delete(jobKey);
       });
 
-      child.on("error", (err) => {
-        console.error(`[api] multi batch error for ${batchId}: ${err.message}`);
+      child.on("error", () => {
         releaseBatchDomainLocks(domains, process.pid);
         activeJobs.delete(jobKey);
       });
@@ -1050,28 +1256,26 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── GET /multi-status?batch_id=... ──────────────────────────────────────────
+  // Multi-scan status
   if (method === "GET" && url.pathname === "/multi-status") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
-    if (!batchId)
+    if (!batchId) {
       return jsonResponse(res, 400, {
         ok: false,
         error: "batch_id parameter required",
       });
+    }
 
     const meta = getBatchMeta(batchId);
-    if (!meta)
+    if (!meta) {
       return jsonResponse(res, 404, { ok: false, error: "Unknown batch_id" });
+    }
 
     const jobKey = `multi:${batchId}`;
     const jobId = meta.jobId || batchId;
     const progress = readProgress(jobId);
-    const logTail = tailFile(
-      meta.logPath || path.join(API_BATCH_DIR, `${batchId}.log`),
-      60,
-    );
+    const logTail = tailFile(meta.logPath || path.join(API_BATCH_DIR, `${batchId}.log`), 60);
 
-    // Running batch
     if (activeJobs.has(jobKey)) {
       const entry = activeJobs.get(jobKey);
       const completed = parseInt(progress?.completed || "0", 10);
@@ -1095,15 +1299,9 @@ function handleRequest(req, res) {
       });
     }
 
-    // Finished batch
-    const batchPath =
-      meta.batchPath || findNewestBatchPathAfter(meta.startedAt) || "";
-    const statsPath =
-      meta.statsJsonPath ||
-      (batchPath ? path.join(batchPath, "_batch_stats.json") : "");
-    const summaryPath =
-      meta.summaryCsvPath ||
-      (batchPath ? path.join(batchPath, "summary.csv") : "");
+    const batchPath = meta.batchPath || findNewestBatchPathAfter(meta.startedAt) || "";
+    const statsPath = meta.statsJsonPath || (batchPath ? path.join(batchPath, "_batch_stats.json") : "");
+    const summaryPath = meta.summaryCsvPath || (batchPath ? path.join(batchPath, "summary.csv") : "");
     const stats = statsPath ? readJsonOrNull(statsPath) : null;
 
     let total = meta.total || 0;
@@ -1130,9 +1328,7 @@ function handleRequest(req, res) {
       total,
       completed,
       failed,
-      batch_folder: batchPath
-        ? path.basename(batchPath)
-        : meta.batchFolder || "",
+      batch_folder: batchPath ? path.basename(batchPath) : meta.batchFolder || "",
       batch_path: batchPath,
       summary_csv: summaryPath || "",
       stats_json: statsPath || "",
@@ -1140,27 +1336,24 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── GET /multi-result?batch_id=... ──────────────────────────────────────────
+  // Multi-scan result
   if (method === "GET" && url.pathname === "/multi-result") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
-    if (!batchId)
+    if (!batchId) {
       return jsonResponse(res, 400, {
         ok: false,
         error: "batch_id parameter required",
       });
+    }
 
     const meta = getBatchMeta(batchId);
-    if (!meta)
+    if (!meta) {
       return jsonResponse(res, 404, { ok: false, error: "Unknown batch_id" });
+    }
 
-    const batchPath =
-      meta.batchPath || findNewestBatchPathAfter(meta.startedAt) || "";
-    const summaryPath =
-      meta.summaryCsvPath ||
-      (batchPath ? path.join(batchPath, "summary.csv") : "");
-    const statsPath =
-      meta.statsJsonPath ||
-      (batchPath ? path.join(batchPath, "_batch_stats.json") : "");
+    const batchPath = meta.batchPath || findNewestBatchPathAfter(meta.startedAt) || "";
+    const summaryPath = meta.summaryCsvPath || (batchPath ? path.join(batchPath, "summary.csv") : "");
+    const statsPath = meta.statsJsonPath || (batchPath ? path.join(batchPath, "_batch_stats.json") : "");
 
     if (!summaryPath || !fs.existsSync(summaryPath)) {
       return jsonResponse(res, 404, {
@@ -1194,18 +1387,20 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── GET /multi-log?batch_id=... ─────────────────────────────────────────────
+  // Multi-scan log
   if (method === "GET" && url.pathname === "/multi-log") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
-    if (!batchId)
+    if (!batchId) {
       return jsonResponse(res, 400, {
         ok: false,
         error: "batch_id parameter required",
       });
+    }
 
     const meta = getBatchMeta(batchId);
-    if (!meta)
+    if (!meta) {
       return jsonResponse(res, 404, { ok: false, error: "Unknown batch_id" });
+    }
 
     const log = readFileOrNull(meta.logPath) || "(no batch log yet)";
     res.writeHead(200, {
@@ -1215,7 +1410,7 @@ function handleRequest(req, res) {
     return res.end(log);
   }
 
-  // ── GET /log?job_id=... (or ?domain=...) ────────────────────────────────────
+  // Single log
   if (method === "GET" && url.pathname === "/log") {
     const jobId = (url.searchParams.get("job_id") || "").trim();
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
@@ -1239,17 +1434,66 @@ function handleRequest(req, res) {
     return res.end(log);
   }
 
-  // ── DELETE /jobs/stale?hours=2 — kill jobs older than X hours ───────────────
-  // Also accepts GET for convenience (e.g. curl without -X DELETE)
-  if (
-    (method === "DELETE" || method === "GET") &&
-    url.pathname === "/jobs/stale"
-  ) {
+  // Serve tester HTML files
+  if (method === "GET" && url.pathname === "/tester") {
+    try {
+      const html = fs.readFileSync(path.join(TOOL_DIR, "api-tester.html"), "utf8");
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+      });
+      return res.end(html);
+    } catch (e) {
+      return jsonResponse(res, 500, { ok: false, error: "Could not load api-tester.html: " + e.message });
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/tester-multi") {
+    try {
+      const html = fs.readFileSync(path.join(TOOL_DIR, "api-tester-multi.html"), "utf8");
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+      });
+      return res.end(html);
+    } catch (e) {
+      return jsonResponse(res, 500, { ok: false, error: "Could not load api-tester-multi.html: " + e.message });
+    }
+  }
+
+  // Cleanup API helper files
+  if (method === "GET" && url.pathname === "/cleanup-api-files") {
+    const hours = parseInt(url.searchParams.get("hours") || "24", 10);
+
+    if (isNaN(hours) || hours <= 0) {
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "hours parameter must be a positive integer",
+      });
+    }
+
+    const result = cleanupOldApiHelperFiles(hours);
+
+    return jsonResponse(res, result.ok ? 200 : 500, {
+      ok: result.ok,
+      hours,
+      deleted_count: result.deleted.length,
+      skipped_count: result.skipped.length,
+      deleted: result.deleted,
+      skipped: result.skipped,
+      errors: result.errors,
+      cutoff_iso: result.cutoff_iso || null,
+      error: result.error || null,
+    });
+  }
+
+  // Cleanup stale jobs
+  if ((method === "DELETE" || method === "GET") && url.pathname === "/jobs/stale") {
     const hours = parseFloat(url.searchParams.get("hours") || "2");
     if (isNaN(hours) || hours <= 0) {
       return jsonResponse(res, 400, {
         ok: false,
-        error: "hours parameter must be a positive number (e.g. ?hours=2)",
+        error: "hours parameter must be a positive number",
       });
     }
     const maxAgeMs = hours * 60 * 60 * 1000;
@@ -1262,7 +1506,7 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── GET /jobs — list all active jobs ────────────────────────────────────────
+  // List all jobs
   if (method === "GET" && url.pathname === "/jobs") {
     return jsonResponse(res, 200, {
       ok: true,
@@ -1281,39 +1525,138 @@ function handleRequest(req, res) {
     });
   }
 
-  // ── GET /tester ─────────────────────────────────────────────────────────────
-  if (method === "GET" && url.pathname === "/tester") {
-    const htmlPath = path.join(TOOL_DIR, "api-tester.html");
-    const html = readFileOrNull(htmlPath);
-    if (!html)
-      return jsonResponse(res, 404, {
-        ok: false,
-        error: "api-tester.html not found in " + TOOL_DIR,
-      });
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
+  // Cleanup old batch folders (keep latest X days)
+  if (method === "GET" && url.pathname === "/cleanup-batches") {
+    const days = parseInt(url.searchParams.get("days") || "7", 10);
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const deleted = [];
+    const errors = [];
+
+    try {
+      const entries = fs.readdirSync(SCAN_ROOT);
+      for (const entry of entries) {
+        if (!/^\d{4}-\d{2}-\d{2}_/.test(entry)) continue;
+        
+        const fullPath = path.join(SCAN_ROOT, entry);
+        try {
+          const stat = fs.statSync(fullPath);
+          if (stat.isDirectory() && stat.mtimeMs < cutoff) {
+            const folderDate = entry.split('_')[0];
+            const now = new Date();
+            const isCurrentDay = folderDate === `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+            
+            if (!isCurrentDay) {
+              fs.rmSync(fullPath, { recursive: true, force: true });
+              deleted.push(entry);
+              console.log(`[cleanup] Deleted old batch: ${entry}`);
+            }
+          }
+        } catch (e) {
+          errors.push({ entry, error: e.message });
+        }
+      }
+    } catch (e) {
+      return jsonResponse(res, 500, { ok: false, error: e.message });
+    }
+
+    return jsonResponse(res, 200, { 
+      ok: true, 
+      deleted, 
+      errors, 
+      days,
+      message: `Deleted ${deleted.length} batch folders older than ${days} days`
     });
-    return res.end(html);
   }
 
-  // ── GET /tester-multi ───────────────────────────────────────────────────────
-  if (method === "GET" && url.pathname === "/tester-multi") {
-    const htmlPath = path.join(TOOL_DIR, "api-tester-multi.html");
-    const html = readFileOrNull(htmlPath);
-    if (!html)
-      return jsonResponse(res, 404, {
-        ok: false,
-        error: "api-tester-multi.html not found in " + TOOL_DIR,
-      });
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-    });
-    return res.end(html);
+  // Latest results - CSV or JSON
+  if (method === "GET" && url.pathname === "/latest") {
+    const format = url.searchParams.get("format") || "json";
+    const latestCsv = path.join(OUTPUT_DIR, "latest.csv");
+    const latestJson = path.join(OUTPUT_DIR, "latest.json");
+
+    if (format === "csv") {
+      if (fs.existsSync(latestCsv)) {
+        const content = fs.readFileSync(latestCsv, "utf8");
+        res.writeHead(200, {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Content-Disposition": "attachment; filename=latest.csv"
+        });
+        return res.end(content);
+      } else {
+        return jsonResponse(res, 404, { ok: false, error: "latest.csv not found" });
+      }
+    } else {
+      if (fs.existsSync(latestJson)) {
+        const content = fs.readFileSync(latestJson, "utf8");
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        });
+        return res.end(content);
+      } else {
+        return jsonResponse(res, 404, { ok: false, error: "latest.json not found" });
+      }
+    }
   }
 
-  // ── GET /cleanup?days=7 ──────────────────────────────────────────────────────
+  // Get specific domain from latest
+  if (method === "GET" && url.pathname === "/latest/domain") {
+    const domain = sanitizeDomain(url.searchParams.get("domain") || "");
+    if (!domain) {
+      return jsonResponse(res, 400, { ok: false, error: "domain parameter required" });
+    }
+
+    try {
+      const { getDomainFromLatest } = require('./utils/latest-results');
+      const data = getDomainFromLatest(domain);
+      
+      if (data) {
+        return jsonResponse(res, 200, { ok: true, data });
+      } else {
+        return jsonResponse(res, 404, { ok: false, error: `Domain ${domain} not found in latest results` });
+      }
+    } catch (err) {
+      return jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  // Get stats from latest
+  if (method === "GET" && url.pathname === "/latest/stats") {
+    try {
+      const { getAllLatestDomains } = require('./utils/latest-results');
+      const allDomains = getAllLatestDomains();
+      
+      const stats = {
+        total_domains: allDomains.length,
+        last_updated: allDomains.length > 0 ? 
+          allDomains.reduce((latest, d) => {
+            const date = new Date(d.Run_At);
+            return date > latest ? date : latest;
+          }, new Date(0)).toISOString() : null,
+        ssl_grade_distribution: {},
+        pagespeed_performance_distribution: {},
+        sucuri_status_distribution: {}
+      };
+
+      for (const domain of allDomains) {
+        const sslGrade = domain.SSL_Grade || "N/A";
+        stats.ssl_grade_distribution[sslGrade] = (stats.ssl_grade_distribution[sslGrade] || 0) + 1;
+        
+        const pagespeedPerf = domain.PageSpeed_Performance || "N/A";
+        stats.pagespeed_performance_distribution[pagespeedPerf] = (stats.pagespeed_performance_distribution[pagespeedPerf] || 0) + 1;
+        
+        const sucuriStatus = domain.Sucuri_Overall || "N/A";
+        stats.sucuri_status_distribution[sucuriStatus] = (stats.sucuri_status_distribution[sucuriStatus] || 0) + 1;
+      }
+
+      return jsonResponse(res, 200, { ok: true, stats });
+    } catch (err) {
+      return jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  // Cleanup old scan folders (backward compatibility)
   if (method === "GET" && url.pathname === "/cleanup") {
     const days = parseInt(url.searchParams.get("days") || "7", 10);
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
@@ -1342,7 +1685,6 @@ function handleRequest(req, res) {
     return jsonResponse(res, 200, { ok: true, deleted, errors, days });
   }
 
-  // 404 fallback
   return jsonResponse(res, 404, {
     ok: false,
     error: `Unknown endpoint: ${url.pathname}`,
@@ -1350,22 +1692,14 @@ function handleRequest(req, res) {
 }
 
 // ── Start server ──────────────────────────────────────────────────────────────
+
 const server = http.createServer(handleRequest);
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[api] ssl-checker-tool API server running on port ${PORT}`);
-  console.log(`[api] endpoints:`);
-  console.log(`[api]   POST http://0.0.0.0:${PORT}/scan`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/status?domain=example.com`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/result?domain=example.com`);
-  console.log(`[api]   POST http://0.0.0.0:${PORT}/multi-scan`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/multi-status?batch_id=...`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/multi-result?batch_id=...`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/multi-log?batch_id=...`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/jobs`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/jobs/stale?hours=2  (kill stale jobs)`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/health`);
-  console.log(`[api]   GET  http://0.0.0.0:${PORT}/log?job_id=...`);
+  console.log(`[api] TOOL_DIR=${TOOL_DIR}`);
+  console.log(`[api] OUTPUT_DIR=${OUTPUT_DIR}`);
+  console.log(`[api] SCAN_ROOT=${SCAN_ROOT}`);
 });
 
 server.on("error", (err) => {

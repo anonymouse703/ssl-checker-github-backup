@@ -481,21 +481,22 @@ async function runSSLLabs(domain, context) {
 
     if (result.source === "api") {
       // ✅ API won — we have the grade (possibly early/partial).
-      // Kick off the screenshot independently so it can keep waiting for
-      // all servers to finish while the caller already has the CSV grade.
-      // screenshotViaFreshTab uses fromCache=on + SSL_PAGE_STATE_FN which
-      // won't capture until the "Please wait" banner is gone on ALL servers.
+      // Return the grade immediately, capture screenshot in background
       const screenshotPromise = screenshotViaFreshTab().catch(() => null);
-
-      // Return immediately with the grade — screenshot will finish in background
-      // and write ssl.png to disk when the full page is ready.
-      const screenshot = await screenshotPromise;
+      
+      // Don't await the screenshot - let it run in background
+      screenshotPromise.then(screenshot => {
+        // Update the screenshot file when ready
+        console.log(`[ssl-labs] Screenshot captured for ${domain}: ${screenshot || 'failed'}`);
+      });
+      
+      // Return immediately with grade
       return {
         status: "SUCCESS",
         data: result.data,
         error: null, errorCode: null,
         url: `${ENDPOINTS.SSL_LABS_WEB}?d=${domain}`,
-        screenshot,
+        screenshot: null,  // Initially null, will be updated later when file exists
       };
     } else {
       // Browser scraper won — it already waited for the full page, screenshot included

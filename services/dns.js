@@ -333,7 +333,7 @@ async function runWhatsMyDNS(domain, context) {
     }
   } finally {
     try {
-      await tab.close();
+      await tab.close().catch(() => {});
     } catch (_) {}
   }
 }

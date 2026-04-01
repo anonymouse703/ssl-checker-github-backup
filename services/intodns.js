@@ -141,7 +141,7 @@ async function runIntoDNS(domain, context) {
       screenshot,
     };
   } finally {
-    await tab.close();
+    await tab.close().catch(() => {});
   }
 }
 

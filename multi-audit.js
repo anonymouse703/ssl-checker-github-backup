@@ -1,39 +1,46 @@
 /**
  * multi-audit.js
- *
- * EXPECTED TIMES (with SSL_STAGGER_SEC=60):
- *   2  domains @ 3 concurrent = ~8-12 min  (was 33+ min)
- *   10 domains @ 3 concurrent = ~12-18 min (was 45+ min)
- *   50 domains @ 3 concurrent = ~40-55 min
+ * Batch processor for multiple domains
+ * Optimized for memory safety with 10-15 domains
  */
 
 'use strict';
 
-const { spawn }  = require('child_process');
-const path       = require('path');
-const fs         = require('fs');
+const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 const { resolveBatchPath } = require('./audit-paths');
+const { parseCSVRow } = require('./utils/csv-writer');
+const { updateLatestResults } = require('./utils/latest-results');
 
-// ── Configuration ─────────────────────────────────────────────────────────────
-const CONFIG = {
-    MAX_CONCURRENT: parseInt(process.env.MAX_CONCURRENT || '2', 10),
-    SSL_STAGGER_SEC: 60,      // 60s is enough to avoid SSL Labs rate limits (was 270s = 4.5 min!)
-    GROUP_DELAY_MS: 15000,    // 15s cooldown between groups (was 60s)
-    DOMAIN_LAUNCH_DELAY_MS: 2000,  // 2s process-spawn stagger (was 5s)
-};
-
-// ── Parse domains ─────────────────────────────────────────────────────────────
+// ── Parse domains first to determine optimal config ──────────────────────────
 const args = process.argv.slice(2);
 let domains = [];
 
+console.log('\n🔍 MULTI-AUDIT DEBUG:');
+console.log(`   Command line args: ${JSON.stringify(args)}`);
+
 if (args.length === 1 && args[0].endsWith('.txt')) {
     const filePath = path.join(__dirname, args[0]);
-    domains = fs.readFileSync(filePath, 'utf8')
+    console.log(`   Reading from file: ${filePath}`);
+    
+    if (!fs.existsSync(filePath)) {
+        console.error(`❌ File not found: ${filePath}`);
+        process.exit(1);
+    }
+    
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    console.log(`   File content:\n${fileContent}`);
+    
+    domains = fileContent
         .split('\n')
         .map(d => d.trim())
         .filter(d => d && !d.startsWith('#'));
+        
+    console.log(`   Parsed ${domains.length} domains from file`);
 } else {
     domains = args.filter(a => !a.startsWith('--'));
+    console.log(`   Parsed ${domains.length} domains from command line: ${domains}`);
 }
 
 if (domains.length === 0) {
@@ -42,23 +49,86 @@ if (domains.length === 0) {
     process.exit(1);
 }
 
-const uniqueDomains = [...new Set(domains)];
-const total         = uniqueDomains.length;
+// Sanitize function
+function sanitizeDomain(raw) {
+    let s = String(raw || '').trim().toLowerCase();
+
+    s = s.replace(/^https?:\/\//i, '');
+    s = s.replace(/^www\./i, '');
+    s = s.split('/')[0];
+    s = s.split('?')[0];
+    s = s.split('#')[0];
+    s = s.replace(/:\d+$/, '');
+    s = s.replace(/\.+$/, '');
+
+    return s;
+}
+
+const uniqueDomains = [...new Set(
+    domains.map(sanitizeDomain).filter(Boolean)
+)];
+
+const total = uniqueDomains.length;
+
+console.log(`\n✅ Final domains to process: ${uniqueDomains.length}`);
+console.log(`   Domains: ${uniqueDomains.join(', ')}\n`);
+
+// ── Memory-safe Configuration ─────────────────────────────────────────────────
+const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB || '800', 10);
+const MAX_CONCURRENT_DEFAULT = parseInt(process.env.MAX_CONCURRENT || '3', 10);
+
+let CONFIG = {
+    MAX_CONCURRENT: Math.min(4, MAX_CONCURRENT_DEFAULT),
+    SSL_STAGGER_SEC: 60,
+    GROUP_DELAY_MS: 30000,  // 30 seconds for memory cleanup
+    DOMAIN_LAUNCH_DELAY_MS: 3000,  // 3 seconds between launches
+};
+
+// For large batches, be more conservative
+if (total > 15) {
+    CONFIG.MAX_CONCURRENT = Math.min(3, MAX_CONCURRENT_DEFAULT);
+    CONFIG.GROUP_DELAY_MS = 45000;  // 45 seconds
+}
+
+console.log(`\n💾 Memory configuration:`);
+console.log(`   • Memory limit: ${MEMORY_LIMIT_MB}MB`);
+console.log(`   • Concurrent domains: ${CONFIG.MAX_CONCURRENT}`);
+console.log(`   • Group cooldown: ${CONFIG.GROUP_DELAY_MS/1000}s`);
+console.log(`   • Launch delay: ${CONFIG.DOMAIN_LAUNCH_DELAY_MS/1000}s\n`);
 
 // ── Resolve batch path ONCE — all children share it ──────────────────────────
 const SCAN_BATCH_PATH = resolveBatchPath();
+console.log(`📁 Batch folder: ${SCAN_BATCH_PATH}`);
+
+// Create the batch folder
 if (!fs.existsSync(SCAN_BATCH_PATH)) {
     fs.mkdirSync(SCAN_BATCH_PATH, { recursive: true });
+    console.log(`✓ Created batch folder: ${SCAN_BATCH_PATH}`);
 }
 
-// ── Progress file — FileMaker reads this to show live status ──────────────────
-const OUTPUT_DIR = '/home/ind/ind_leads_inputs';
+const batchFolder = path.basename(SCAN_BATCH_PATH);
+console.log(`✓ Batch folder name: ${batchFolder}`);
+
+// Create summary.csv with headers if it doesn't exist
+const summaryPath = path.join(SCAN_BATCH_PATH, 'summary.csv');
+const { SUMMARY_FIELDS } = require('./config/constants');
+
+if (!fs.existsSync(summaryPath)) {
+    fs.writeFileSync(summaryPath, SUMMARY_FIELDS.join(',') + '\n', 'utf8');
+    console.log(`✓ Created summary.csv at: ${summaryPath}`);
+}
+
+// Create batch stats file
+const statsPath = path.join(SCAN_BATCH_PATH, '_batch_stats.json');
+
+// ── Progress file for FileMaker ──────────────────────────────────────────────
+const OUTPUT_DIR = process.env.OUTPUT_DIR || '/home/ind/ind_leads_inputs';
 const JOB_ID = process.env.JOB_ID || `batch_${Date.now()}`;
 const PROGRESS_FILE = path.join(OUTPUT_DIR, `progress_${JOB_ID}.txt`);
 
-// Ensure output dir exists
-const progressDir = path.dirname(PROGRESS_FILE);
-if (!fs.existsSync(progressDir)) fs.mkdirSync(progressDir, { recursive: true });
+if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+}
 
 function writeProgress(completed, total, lastDomain, finishTime, status) {
     try {
@@ -68,26 +138,24 @@ function writeProgress(completed, total, lastDomain, finishTime, status) {
             `last_domain=${lastDomain}`,
             `last_finish=${finishTime}`,
             `status=${status}`,
+            `job_id=${JOB_ID}`,
         ];
         fs.writeFileSync(PROGRESS_FILE, lines.join('\n'), 'utf8');
+        const pct = Math.round((completed / total) * 100);
+        console.log(`[progress] 📊 ${completed}/${total} (${pct}%) - ${status}`);
     } catch (e) {
-        // Non-fatal — don't crash the audit if progress file can't be written
+        console.error(`[progress] Error: ${e.message}`);
     }
 }
 
-// ── Labels ────────────────────────────────────────────────────────────────────
-const now         = new Date();
-const batchFolder = path.basename(SCAN_BATCH_PATH);   // e.g. 2026-03-01 or 2026-03-01-2
-const statsPath   = path.join(SCAN_BATCH_PATH, '_batch_stats.json');
-
 // ── Time estimate ─────────────────────────────────────────────────────────────
-const groups          = Math.ceil(total / CONFIG.MAX_CONCURRENT);
-const sslTotalStagger = (CONFIG.MAX_CONCURRENT - 1) * CONFIG.SSL_STAGGER_SEC; 
-const estMinPerGroup  = Math.ceil((4 * 60 + sslTotalStagger) / 60);        
-const estTotalMin     = groups * estMinPerGroup + Math.ceil((groups - 1) * CONFIG.GROUP_DELAY_MS / 60000);
+const groups = Math.ceil(total / CONFIG.MAX_CONCURRENT);
+const sslTotalStagger = (CONFIG.MAX_CONCURRENT - 1) * CONFIG.SSL_STAGGER_SEC;
+const estMinPerGroup = Math.ceil((4 * 60 + sslTotalStagger) / 60);
+const estTotalMin = groups * estMinPerGroup + Math.ceil((groups - 1) * CONFIG.GROUP_DELAY_MS / 60000);
 
 // ── Banner ────────────────────────────────────────────────────────────────────
-console.log('╔══════════════════════════════════════════════════════════════════════════╗');
+console.log('\n╔══════════════════════════════════════════════════════════════════════════╗');
 console.log('║                      FM AUDIT TOOL — BATCH PROCESSOR                      ║');
 console.log('╚══════════════════════════════════════════════════════════════════════════╝');
 console.log(`📋 Domains            : ${total}`);
@@ -97,55 +165,154 @@ console.log(`⏱️  Group cooldown     : ${CONFIG.GROUP_DELAY_MS/1000}s`);
 console.log(`🗂️  Batch folder       : ${batchFolder}/`);
 console.log(`__BATCH_FOLDER__:${batchFolder}`);
 console.log(`⏳ Estimated time     : ~${estTotalMin} min`);
-console.log('');
-console.log('');
-console.log('📁 Output structure:');
-console.log(`   /home/ind/${batchFolder}/`);
-console.log(`   ├── summary.csv          ← all domains in one file`);
-console.log(`   └── _batch_stats.json`);
-console.log('');
+console.log(`📊 Groups             : ${groups} groups\n`);
 
-// Write initial progress so FileMaker sees 0/total immediately
+console.log('📁 Output structure:');
+console.log(`   ${SCAN_BATCH_PATH}/`);
+console.log(`   ├── summary.csv                ← batch summary (all domains)`);
+console.log(`   ├── _batch_stats.json`);
+console.log(`   └── [domain1]/`);
+console.log(`       ├── summary.csv            ← per-domain summary`);
+console.log(`       ├── [domain1]_results.csv  ← full per-domain CSV`);
+console.log(`       └── images/`);
+console.log(`           ├── ssl.png`);
+console.log(`           ├── intodns.png`);
+console.log(`           ├── pagespeed.png`);
+console.log(`           ├── pingdom.png`);
+console.log(`           ├── sucuri.png`);
+console.log(`           └── ...\n`);
+
+// Write initial progress
 writeProgress(0, total, '', '', 'RUNNING');
 
 const overallStart = Date.now();
 const results = {
-    completed:   [],
-    failed:      [],
+    completed: [],
+    failed: [],
     errors: {
-        sslLabs:          0,
-        gtmetrix:         0,
-        sslLabsDetails:   {},
-        gtmetrixDetails:  {},
+        sslLabs: 0,
+        gtmetrix: 0,
+        sslLabsDetails: {},
+        gtmetrixDetails: {},
     },
     timing: { groups: [] }
 };
+
+// ── Memory monitoring for safe operation ──────────────────────────────────────
+let memoryWarningCount = 0;
+
+function checkMemory() {
+    const usage = process.memoryUsage();
+    const rssMB = Math.round(usage.rss / 1024 / 1024);
+    const heapMB = Math.round(usage.heapUsed / 1024 / 1024);
+    
+    if (rssMB > MEMORY_LIMIT_MB) {
+        console.log(`[memory] ⚠️ CRITICAL: Memory at ${rssMB}MB (limit: ${MEMORY_LIMIT_MB}MB)`);
+        memoryWarningCount++;
+        
+        if (memoryWarningCount > 3) {
+            console.log(`[memory] 🔥 Memory threshold exceeded! Reducing concurrency for next batch...`);
+            CONFIG.GROUP_DELAY_MS = 60000; // 60 seconds
+        }
+        
+        if (global.gc) {
+            console.log(`[memory] Forcing garbage collection...`);
+            global.gc();
+        }
+    } else if (rssMB > MEMORY_LIMIT_MB * 0.7) {
+        console.log(`[memory] ⚠️ High memory: ${rssMB}MB / ${MEMORY_LIMIT_MB}MB (${Math.round((rssMB/MEMORY_LIMIT_MB)*100)}%)`);
+    } else {
+        console.log(`[memory] ✓ Memory: ${rssMB}MB RSS | ${heapMB}MB heap`);
+    }
+    
+    return rssMB;
+}
+
+function sanitizeDomain(raw) {
+    let s = String(raw || '').trim().toLowerCase();
+
+    s = s.replace(/^https?:\/\//i, '');
+    s = s.replace(/^www\./i, '');
+    s = s.split('/')[0];
+    s = s.split('?')[0];
+    s = s.split('#')[0];
+    s = s.replace(/:\d+$/, '');
+    s = s.replace(/\.+$/, '');
+
+    return s;
+}
+
+// Start memory monitor
+const memoryMonitor = setInterval(() => {
+    if (results.completed.length + results.failed.length < total) {
+        checkMemory();
+    } else {
+        clearInterval(memoryMonitor);
+    }
+}, 30000);
+
+// ── Helper to read domain CSV and update latest results ──────────────────────
+async function updateLatestForDomain(domain) {
+    const domainCsvPath = path.join(SCAN_BATCH_PATH, domain, `${domain}_results.csv`);
+    
+    if (!fs.existsSync(domainCsvPath)) {
+        console.log(`[multi-audit] No CSV found for ${domain} at ${domainCsvPath}`);
+        return false;
+    }
+
+    try {
+        const content = fs.readFileSync(domainCsvPath, "utf8");
+        const lines = content.split("\n").filter(l => l.trim());
+        
+        if (lines.length < 2) {
+            console.log(`[multi-audit] Invalid CSV for ${domain}: not enough lines`);
+            return false;
+        }
+
+        const headers = parseCSVRow(lines[0]);
+        const cols = parseCSVRow(lines[lines.length - 1]);
+        
+        const rowData = {};
+        headers.forEach((h, idx) => {
+            rowData[h] = cols[idx] || "";
+        });
+        
+        await updateLatestResults(rowData);
+        console.log(`[multi-audit] ✅ Updated latest results for ${domain}`);
+        return true;
+    } catch (err) {
+        console.error(`[multi-audit] Failed to update latest for ${domain}: ${err.message}`);
+        return false;
+    }
+}
 
 // ── Run a single domain audit ─────────────────────────────────────────────────
 function runAudit(domain, groupNum, posInGroup) {
     return new Promise((resolve) => {
         const start = Date.now();
         const label = `[G${groupNum}-D${posInGroup + 1}]`.padEnd(12);
-
-        // Stagger SSL position 0 = no delay, position 1 = 45s, position 2 = 90s
+        
         const sslDelayMs = posInGroup * CONFIG.SSL_STAGGER_SEC * 1000;
 
         console.log(`${label} 🚀 ${domain}`);
+        console.log(`${label}    📁 ${path.join(batchFolder, domain)}/`);
         if (sslDelayMs > 0) {
             console.log(`${label}    🔒 SSL checks will start in ${sslDelayMs/1000}s (stagger)`);
         }
-        console.log(`${label}    📁 /home/ind/${batchFolder}/${domain}/`);
 
         const childJobId = `${JOB_ID}_${domain.replace(/[^a-z0-9._-]/gi, '_')}`;
+        
         const child = spawn('node', ['index.js', domain], {
             cwd: __dirname,
             env: {
                 ...process.env,
                 SCAN_BATCH_PATH,
-                SSL_QUEUE_DELAY_MS: String(sslDelayMs),   // ← tells full audit when to start SSL
+                SSL_QUEUE_DELAY_MS: String(sslDelayMs),
                 BATCH_MODE: 'true',
                 JOB_ID: childJobId,
                 DOMAIN_LOCK_ALREADY_HELD: '1',
+                // Memory limit per child process
+                NODE_OPTIONS: '--max-old-space-size=256',
             }
         });
 
@@ -174,7 +341,7 @@ function runAudit(domain, groupNum, posInGroup) {
             });
         });
 
-        child.on('close', (code) => {
+        child.on('close', async (code) => {
             const elapsed = Math.round((Date.now() - start) / 1000);
             const finishTime = new Date().toLocaleString('en-US', {
                 month: '2-digit', day: '2-digit', year: 'numeric',
@@ -183,19 +350,19 @@ function runAudit(domain, groupNum, posInGroup) {
 
             if (code === 0) {
                 results.completed.push(domain);
-                console.log(`${label} ✅ ${Math.floor(elapsed/60)}m ${elapsed%60}s → /home/ind/${batchFolder}/${domain}/`);
+                console.log(`${label} ✅ ${Math.floor(elapsed/60)}m ${elapsed%60}s → ${path.join(batchFolder, domain)}/`);
+                await updateLatestForDomain(domain);
             } else {
                 results.failed.push(domain);
                 console.log(`${label} ❌ Failed in ${Math.floor(elapsed/60)}m ${elapsed%60}s`);
             }
 
-            // Update progress file — FileMaker polls this
             const doneCount = results.completed.length + results.failed.length;
             const statusLine = code === 0
                 ? `✅ ${domain} — finished at ${finishTime}`
                 : `❌ ${domain} — failed at ${finishTime}`;
             writeProgress(doneCount, total, domain, finishTime, statusLine);
-            console.log(`${label} 📊 Progress: ${doneCount}/${total}`);
+            console.log(`${label} 📊 Progress: ${doneCount}/${total} (${results.completed.length} OK, ${results.failed.length} failed)`);
             console.log(`__DOMAIN_DONE__:${domain}:${code}`);
 
             resolve();
@@ -204,6 +371,8 @@ function runAudit(domain, groupNum, posInGroup) {
         child.on('error', (err) => {
             console.error(`${label} ❌ ${err.message}`);
             results.failed.push(domain);
+            const doneCount = results.completed.length + results.failed.length;
+            writeProgress(doneCount, total, domain, new Date().toLocaleString(), `❌ ${domain} failed`);
             console.log(`__DOMAIN_DONE__:${domain}:1`);
             resolve();
         });
@@ -220,7 +389,7 @@ async function runAll() {
     console.log(`📦 ${groups.length} group(s) × up to ${CONFIG.MAX_CONCURRENT} domains\n`);
 
     for (let g = 0; g < groups.length; g++) {
-        const group      = groups[g];
+        const group = groups[g];
         const groupStart = Date.now();
 
         console.log('═'.repeat(70));
@@ -228,12 +397,10 @@ async function runAll() {
         console.log(`   🔒 SSL schedule:`);
         group.forEach((d, i) => {
             const delay = i * CONFIG.SSL_STAGGER_SEC;
-            console.log(`      ${i===0?'→':'⏳'} ${d.padEnd(35)} SSL starts at t+${delay}s`);
+            console.log(`      ${i === 0 ? '→' : '⏳'} ${d.padEnd(35)} SSL starts at t+${delay}s`);
         });
         console.log('═'.repeat(70));
 
-        // Launch all domains with a tiny process-spawn stagger (2s),
-        // but SSL staggering is handled inside each child via SSL_QUEUE_DELAY_MS
         const promises = group.map((domain, i) =>
             new Promise(resolve =>
                 setTimeout(
@@ -255,9 +422,26 @@ async function runAll() {
         console.log(`   Progress : ${results.completed.length}/${total} OK  |  ${results.failed.length} failed`);
         console.log(`   SSL capacity hits this group: ${sslHitsThisGroup} (total: ${results.errors.sslLabs})`);
 
+        // Enhanced cooldown with memory cleanup
         if (g < groups.length - 1) {
             console.log(`\n⏸️  Group cooldown ${CONFIG.GROUP_DELAY_MS/1000}s...`);
+            
+            const beforeMem = checkMemory();
+            
             await new Promise(r => setTimeout(r, CONFIG.GROUP_DELAY_MS));
+            
+            if (global.gc) {
+                console.log(`[memory] Running GC before next group...`);
+                global.gc();
+                await new Promise(r => setTimeout(r, 1000));
+            }
+            
+            const afterMem = checkMemory();
+            const freed = beforeMem - afterMem;
+            if (freed > 0) {
+                console.log(`[memory] ✅ Freed ~${freed}MB after cooldown`);
+            }
+            
             console.log('');
         }
     }
@@ -273,20 +457,9 @@ async function runAll() {
     console.log(`📊 Avg per domain   : ${Math.floor(avgPerDomain/60)}m ${avgPerDomain%60}s`);
     console.log(`✅ Successful       : ${results.completed.length}/${total}`);
     console.log(`❌ Failed           : ${results.failed.length}/${total}`);
-    console.log('');
-    console.log('📊 SSL capacity hits:');
-    if (results.errors.sslLabs === 0) {
-        console.log('   ✅ Zero capacity hits! Staggering worked perfectly.');
-    } else if (results.errors.sslLabs <= total) {
-        console.log(`   ⚠️  ${results.errors.sslLabs} hits (minor — ${(results.errors.sslLabs/total).toFixed(1)}/domain)`);
-        console.log(`   💡 Consider increasing SSL_STAGGER_SEC to ${CONFIG.SSL_STAGGER_SEC + 15}`);
-    } else {
-        console.log(`   ❌ ${results.errors.sslLabs} hits — increase SSL_STAGGER_SEC to ${CONFIG.SSL_STAGGER_SEC + 30}`);
-    }
 
-    const blockingDomains = Object.keys(results.errors.gtmetrixDetails);
-    if (blockingDomains.length > 0) {
-        console.log(`\n🚫 GTmetrix blocked by ${blockingDomains.length} domain(s) (normal for some sites)`);
+    if (results.errors.sslLabs > 0) {
+        console.log(`\n📊 SSL capacity hits: ${results.errors.sslLabs}`);
     }
 
     if (results.failed.length > 0) {
@@ -297,20 +470,27 @@ async function runAll() {
 
     // Save stats JSON
     const stats = {
-        batchPath:   SCAN_BATCH_PATH,
+        batchPath: SCAN_BATCH_PATH,
         batchFolder: batchFolder,
-        timestamp:   new Date().toISOString(),
-        total, successful: results.completed.length, failed: results.failed.length,
+        timestamp: new Date().toISOString(),
+        total,
+        successful: results.completed.length,
+        failed: results.failed.length,
         failedDomains: results.failed,
-        errors:  results.errors,
+        errors: results.errors,
         timing: {
-            totalSeconds:        totalTime,
+            totalSeconds: totalTime,
             avgSecondsPerDomain: avgPerDomain,
-            groups:              results.timing.groups,
+            groups: results.timing.groups,
         },
         config: CONFIG,
+        memory: {
+            limit_mb: MEMORY_LIMIT_MB,
+            warnings: memoryWarningCount
+        }
     };
     fs.writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+    console.log(`\n📁 Stats saved to: ${statsPath}`);
 
     console.log('\n📁 Results:');
     console.log(`   ${SCAN_BATCH_PATH}/`);
@@ -320,12 +500,28 @@ async function runAll() {
     if (results.completed.length > 8) console.log(`   ├── … (${results.completed.length - 8} more)`);
     console.log(`   ├── summary.csv`);
     console.log(`   └── _batch_stats.json`);
-    console.log('');
-    if (results.failed.length === 0) console.log('🎉 100% success rate!');
-    console.log(`✅ Multi-audit completed with exit code 0`);
 
-    // Mark progress as complete so FileMaker knows to stop polling
-    writeProgress(total, total, '', '', `DONE job_id=${JOB_ID}`);
+    // Verify batch summary
+    if (fs.existsSync(summaryPath)) {
+        const content = fs.readFileSync(summaryPath, 'utf8');
+        const lines = content.split('\n').filter(l => l.trim());
+        const rowCount = lines.length - 1;
+        console.log(`\n📊 Batch summary has ${rowCount} domains (expected ${total})`);
+        if (rowCount < total) {
+            console.log(`⚠️ Warning: Missing ${total - rowCount} domains in batch summary`);
+            console.log(`   Completed domains: ${results.completed.length}`);
+            console.log(`   Failed domains: ${results.failed.length}`);
+        }
+    }
+
+    if (results.failed.length === 0) console.log('\n🎉 100% success rate!');
+    console.log(`\n✅ Multi-audit completed`);
+
+    // Mark progress as complete
+    writeProgress(total, total, '', '', `DONE - ${total} domains completed`);
+    
+    // Clear memory monitor
+    clearInterval(memoryMonitor);
 }
 
 runAll().catch(console.error);

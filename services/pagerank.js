@@ -4,6 +4,7 @@ const { ENDPOINTS } = require('../config/constants');
 
 async function runPageRank(domain, context) {
   const start = Date.now();
+  const { paths } = context; 
 
   try {
     const PAGERANK_API_KEY = context.env.PAGERANK_API_KEY || "";

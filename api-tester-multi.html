@@ -1,0 +1,835 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>SSL Checker — Domain Scan Results</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 14px;
+        background: #f3f3f3;
+        color: #222;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        font-size: 13px;
+      }
+
+      .page-title {
+        font-size: 18px;
+        font-weight: bold;
+        margin: 0 0 15px 0;
+        color: #185fa5;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .panel {
+        background: #ffffff;
+        border: 1px solid #d8d8d8;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin-bottom: 12px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+      }
+
+      .row {
+        line-height: 28px;
+      }
+
+      .muted {
+        color: #666666;
+        font-size: 12px;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 4px 14px;
+        background: #e8f0fa;
+        color: #185fa5;
+        border-radius: 20px;
+        font-weight: 600;
+        font-family: monospace;
+        font-size: 12px;
+        margin-left: 8px;
+        margin-right: 8px;
+      }
+
+      .server-pill {
+        display: inline-block;
+        padding: 4px 14px;
+        background: #e8f5e9;
+        color: #2e7d32;
+        border-radius: 20px;
+        font-weight: 600;
+        margin-left: 8px;
+        margin-right: 4px;
+      }
+
+      .status-pill {
+        display: inline-block;
+        padding: 4px 14px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: bold;
+        background: #185fa5;
+        color: #ffffff;
+      }
+
+      .status-pill.done {
+        background: #28a745;
+      }
+
+      .section-title {
+        font-size: 15px;
+        font-weight: bold;
+        margin: 0 0 12px 0;
+        color: #333;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .status-text {
+        margin-bottom: 8px;
+        color: #4b4b4b;
+      }
+
+      .progress-wrap {
+        margin-top: 8px;
+      }
+
+      .progress-bar {
+        width: 100%;
+        height: 10px;
+        background: #e0e0e0;
+        border-radius: 20px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        width: 0%;
+        height: 10px;
+        background: #1f78d1;
+        transition: width 0.3s ease;
+      }
+
+      .progress-fill.done {
+        background: #28a745;
+      }
+
+      .progress-pct {
+        text-align: right;
+        color: #777;
+        font-size: 11px;
+        margin-top: 4px;
+      }
+
+      .console-label {
+        color: #666;
+        font-size: 12px;
+        margin-top: 12px;
+        margin-bottom: 6px;
+        font-weight: 600;
+      }
+
+      .console-box {
+        background: #1e1e1e;
+        color: #d4d4d4;
+        border-radius: 10px;
+        padding: 14px;
+        min-height: 200px;
+        max-height: 800px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: Consolas, 'Courier New', monospace;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .done-banner {
+        display: none;
+        background: #d4edda;
+        border: 1px solid #c3e6cb;
+        color: #155724;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin-bottom: 12px;
+        font-weight: 600;
+      }
+
+      .results-panel {
+        display: none;
+      }
+
+      /* Results Cards Layout - Better for displaying all domains */
+      .results-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+        gap: 16px;
+        margin-top: 12px;
+      }
+
+      .domain-card {
+        background: #ffffff;
+        border: 1px solid #e5e5e5;
+        border-radius: 12px;
+        overflow: hidden;
+        transition: all 0.2s;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      }
+
+      .domain-card:hover {
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        transform: translateY(-2px);
+      }
+
+      .card-header {
+        background: #f8f9fc;
+        padding: 12px 16px;
+        border-bottom: 1px solid #e5e5e5;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .card-domain {
+        font-size: 14px;
+        font-weight: 700;
+        color: #185fa5;
+        word-break: break-all;
+      }
+
+      .card-badge {
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-size: 10px;
+        font-weight: 600;
+      }
+
+      .badge-success {
+        background: #28a745;
+        color: white;
+      }
+
+      .badge-warning {
+        background: #ffc107;
+        color: #333;
+      }
+
+      .badge-danger {
+        background: #dc3545;
+        color: white;
+      }
+
+      .badge-info {
+        background: #17a2b8;
+        color: white;
+      }
+
+      .card-body {
+        padding: 12px 16px;
+      }
+
+      .metric-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 6px 0;
+        border-bottom: 1px solid #f0f0f0;
+      }
+
+      .metric-row:last-child {
+        border-bottom: none;
+      }
+
+      .metric-label {
+        color: #777;
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      .metric-value {
+        font-weight: 600;
+        font-size: 12px;
+        color: #333;
+      }
+
+      .metric-value.good {
+        color: #28a745;
+      }
+
+      .metric-value.warning {
+        color: #ffc107;
+      }
+
+      .metric-value.bad {
+        color: #dc3545;
+      }
+
+      .card-footer {
+        background: #fafbfc;
+        padding: 8px 16px;
+        border-top: 1px solid #e5e5e5;
+        font-size: 10px;
+        color: #888;
+        text-align: right;
+      }
+
+      .card-footer a {
+        color: #185fa5;
+        text-decoration: none;
+      }
+
+      .card-footer a:hover {
+        text-decoration: underline;
+      }
+
+      /* Summary Stats */
+      .summary-stats {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+      }
+
+      .stat-box {
+        background: #f8f9fc;
+        padding: 12px 16px;
+        border-radius: 12px;
+        text-align: center;
+        flex: 1;
+        min-width: 100px;
+        border: 1px solid #e5e5e5;
+      }
+
+      .stat-number {
+        font-size: 26px;
+        font-weight: bold;
+        color: #185fa5;
+      }
+
+      .stat-label {
+        font-size: 11px;
+        color: #777;
+        margin-top: 4px;
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 50px;
+        color: #999;
+      }
+
+      .loading {
+        text-align: center;
+        padding: 40px;
+        color: #666;
+      }
+
+      .filter-bar {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .filter-input {
+        padding: 6px 12px;
+        border: 1px solid #cfcfcf;
+        border-radius: 8px;
+        font-size: 12px;
+        flex: 1;
+        max-width: 250px;
+      }
+
+      .export-btn {
+        background: #28a745;
+        color: white;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .export-btn:hover {
+        background: #218838;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page-title">
+      <span>🔍 SSL Checker — Domain Scan Results</span>
+      <span id="lastUpdated" style="font-size: 11px; color: #888;"></span>
+    </div>
+
+    <!-- Server info card -->
+    <div class="panel" style="padding: 10px 18px;">
+      <div class="row">
+        <span class="muted">📡 Server:</span>
+        <span class="server-pill" id="serverNameTag">—</span>
+        <span class="muted" id="serverUrlTag" style="font-size: 11px;"></span>
+        <span style="flex:1"></span>
+        <span class="muted">📦 Batch ID:</span>
+        <span class="pill" id="batchTag"></span>
+        <span class="status-pill" id="scanStatusBadge">Loading...</span>
+      </div>
+    </div>
+
+    <!-- Progress Panel (only shows while scanning) -->
+    <div class="panel" id="progressPanel">
+      <div class="section-title">📊 Scan Progress</div>
+      <div class="status-text" id="statusText">Waiting...</div>
+      <div class="progress-wrap">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-pct" id="pctText">0%</div>
+      </div>
+      <div class="console-label">📟 Console Output</div>
+      <div class="console-box" id="logBox">(waiting for output...)</div>
+    </div>
+
+    <div class="done-banner" id="doneNotice">
+      <span>✓</span> Batch Complete! All domain results are displayed below.
+    </div>
+
+    <!-- Summary Statistics -->
+    <div class="panel results-panel" id="summaryCard">
+      <div class="section-title">
+        📈 Batch Summary
+        <span id="resultCount" style="font-size: 12px; color: #666;"></span>
+      </div>
+      <div class="summary-stats" id="summaryStats"></div>
+    </div>
+
+    <!-- Filter and Export -->
+    <div class="panel results-panel" id="filterCard">
+      <div class="filter-bar">
+        <input type="text" id="filterInput" class="filter-input" placeholder="🔍 Filter domains..." onkeyup="filterDomains()">
+        <button class="export-btn" onclick="exportToCSV()">📥 Export to CSV</button>
+        <button class="export-btn" onclick="copyToClipboard()">📋 Copy as JSON</button>
+        <button class="export-btn" onclick="refreshResults()" style="background:#185fa5;">🔄 Refresh</button>
+      </div>
+    </div>
+
+    <!-- Results Cards - Shows ALL domains -->
+    <div class="panel results-panel" id="resultCard">
+      <div class="section-title">📋 Domain Results (<span id="displayCount">0</span> domains)</div>
+      <div id="resultsGrid" class="results-grid"></div>
+    </div>
+
+    <script type="text/javascript">
+      (function () {
+        var AUTO_BATCH_ID = getQueryParam("batch_id");
+        var API_BASE = window.location.protocol + "//" + window.location.host;
+        var pollTimer = null;
+        var batchIsDone = false;
+        var allResults = [];
+        var currentFilter = "";
+
+        function byId(id) {
+          return document.getElementById(id);
+        }
+
+        function getQueryParam(name) {
+          var qs = window.location.search;
+          var query = "";
+          var parts, i, pair, key, value;
+
+          if (qs && qs.length > 1) {
+            query = qs.substring(1);
+          }
+
+          if (!query) {
+            return "";
+          }
+
+          parts = query.split("&");
+
+          for (i = 0; i < parts.length; i++) {
+            pair = parts[i].split("=");
+            key = decodeURIComponent(pair[0] || "");
+            value = decodeURIComponent((pair[1] || "").replace(/\+/g, " "));
+            if (key === name) {
+              return value;
+            }
+          }
+
+          return "";
+        }
+
+        function escapeHtml(str) {
+          if (str === null || str === undefined) {
+            return "";
+          }
+          return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        function setText(id, value) {
+          var el = byId(id);
+          if (el) el.innerHTML = escapeHtml(value);
+        }
+
+        function setHtml(id, value) {
+          var el = byId(id);
+          if (el) el.innerHTML = value;
+        }
+
+        function formatValue(value, fallback) {
+          if (value === null || value === undefined || value === "") {
+            return fallback || "N/A";
+          }
+          return String(value);
+        }
+
+        function getServerName() {
+          var fromParam = getQueryParam("server_name");
+          if (fromParam) return fromParam;
+
+          var serverMap = {
+            "65.49.9.241": "VM 1",
+            "65.49.9.242": "VM 2",
+            "65.49.9.243": "VM 3",
+            "65.49.9.244": "VM 4",
+            "65.49.9.245": "VM 5",
+            "v1.in-depth.com": "VM 1",
+            "v2.in-depth.com": "VM 2",
+            "v3.in-depth.com": "VM 3",
+            "localhost": "Local",
+            "127.0.0.1": "Local"
+          };
+
+          var host = API_BASE.replace(/^https?:\/\//, "").replace(/:\d+$/, "");
+          return serverMap[host] || host;
+        }
+
+        function setBadge(done) {
+          var badge = byId("scanStatusBadge");
+          if (badge) {
+            if (done) {
+              badge.innerHTML = "✓ Complete";
+              badge.classList.add("done");
+            } else {
+              badge.innerHTML = "⏳ Scanning...";
+              badge.classList.remove("done");
+            }
+          }
+        }
+
+        function xhrGetJson(url, okFn, errFn) {
+          var xhr = new XMLHttpRequest();
+          xhr.open("GET", url, true);
+          xhr.onreadystatechange = function () {
+            if (xhr.readyState === 4) {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  var data = JSON.parse(xhr.responseText);
+                  okFn(data);
+                } catch (e) {
+                  if (errFn) errFn(e);
+                }
+              } else {
+                if (errFn) errFn(xhr.status);
+              }
+            }
+          };
+          xhr.send(null);
+        }
+
+        function getGradeBadgeClass(grade) {
+          if (grade === "A+" || grade === "A" || grade === "A-") return "badge-success";
+          if (grade === "B" || grade === "C") return "badge-warning";
+          if (grade === "D" || grade === "E" || grade === "F") return "badge-danger";
+          return "badge-info";
+        }
+
+        function getPageSpeedClass(score) {
+          var num = parseInt(score);
+          if (num >= 90) return "good";
+          if (num >= 50) return "warning";
+          return "bad";
+        }
+
+        function renderResultsCards(rows) {
+          var grid = byId("resultsGrid");
+          if (!rows || rows.length === 0) {
+            grid.innerHTML = '<div class="empty-state">📭 No results available for this batch.</div>';
+            return;
+          }
+
+          // Apply filter
+          var filteredRows = rows;
+          if (currentFilter) {
+            filteredRows = rows.filter(function(r) {
+              return (r.Domain || "").toLowerCase().includes(currentFilter.toLowerCase());
+            });
+          }
+
+          byId("displayCount").innerHTML = filteredRows.length + " / " + rows.length;
+          
+          if (filteredRows.length === 0) {
+            grid.innerHTML = '<div class="empty-state">🔍 No domains match "' + escapeHtml(currentFilter) + '"</div>';
+            return;
+          }
+
+          var html = "";
+          for (var i = 0; i < filteredRows.length; i++) {
+            var row = filteredRows[i];
+            var domain = row.Domain || "Unknown";
+            var sslGrade = row.SSL_Grade || "N/A";
+            var sucuri = row.Sucuri_Overall || "N/A";
+            var pagespeed = row.PageSpeed_Performance || "N/A";
+            var pingdom = row.Pingdom_Grade || "N/A";
+            var dnsProp = row.DNS_Propagation || "N/A";
+            var totalTime = row.Total_Time || "N/A";
+            var ipAddress = row.Server_IP_Address || "N/A";
+            var sslUrl = row.SSL_URL || "#";
+            var runAt = row.Run_At ? new Date(row.Run_At).toLocaleString() : "N/A";
+            
+            var sslBadgeClass = getGradeBadgeClass(sslGrade);
+            var sucuriBadgeClass = (sucuri === "CLEAN") ? "badge-success" : "badge-warning";
+            var pagespeedClass = getPageSpeedClass(pagespeed);
+            
+            html += '<div class="domain-card" data-domain="' + escapeHtml(domain).toLowerCase() + '">';
+            html += '<div class="card-header">';
+            html += '<span class="card-domain">' + escapeHtml(domain) + '</span>';
+            html += '<span class="card-badge ' + sslBadgeClass + '">SSL: ' + escapeHtml(sslGrade) + '</span>';
+            html += '</div>';
+            html += '<div class="card-body">';
+            html += '<div class="metric-row"><span class="metric-label">🛡️ Sucuri</span><span class="metric-value"><span class="card-badge ' + sucuriBadgeClass + '" style="font-size:10px;">' + escapeHtml(sucuri) + '</span></span></div>';
+            html += '<div class="metric-row"><span class="metric-label">📈 PageSpeed</span><span class="metric-value ' + pagespeedClass + '">' + escapeHtml(pagespeed) + '</span></div>';
+            html += '<div class="metric-row"><span class="metric-label">📊 Pingdom Grade</span><span class="metric-value">' + escapeHtml(pingdom) + '</span></div>';
+            html += '<div class="metric-row"><span class="metric-label">🌐 DNS Propagation</span><span class="metric-value">' + escapeHtml(dnsProp) + '</span></div>';
+            html += '<div class="metric-row"><span class="metric-label">🖥️ Server IP</span><span class="metric-value">' + escapeHtml(ipAddress) + '</span></div>';
+            html += '<div class="metric-row"><span class="metric-label">⏱️ Scan Time</span><span class="metric-value">' + escapeHtml(totalTime) + '</span></div>';
+            html += '<div class="metric-row"><span class="metric-label">📅 Run At</span><span class="metric-value">' + escapeHtml(runAt) + '</span></div>';
+            html += '</div>';
+            html += '<div class="card-footer"><a href="' + escapeHtml(sslUrl) + '" target="_blank">View SSL Report →</a> | <a href="https://' + escapeHtml(domain) + '" target="_blank">Visit Site</a></div>';
+            html += '</div>';
+          }
+          grid.innerHTML = html;
+        }
+
+        function renderSummaryStats(rows) {
+          var totalDomains = rows.length;
+          var completed = rows.filter(function(r) { 
+            return r.SSL_Grade && r.SSL_Grade !== "N/A" && r.SSL_Grade !== "ERROR"; 
+          }).length;
+          var failed = totalDomains - completed;
+          
+          var pagespeedValues = rows.filter(function(r) { 
+            return r.PageSpeed_Performance && r.PageSpeed_Performance !== "N/A"; 
+          }).map(function(r) { return parseInt(r.PageSpeed_Performance); });
+          var avgPagespeed = pagespeedValues.length > 0 ? 
+            Math.round(pagespeedValues.reduce(function(a,b){return a+b;},0)/pagespeedValues.length) : 0;
+          
+          var sslGrades = {};
+          rows.forEach(function(r) {
+            var grade = r.SSL_Grade || "N/A";
+            sslGrades[grade] = (sslGrades[grade] || 0) + 1;
+          });
+          var topGrade = Object.keys(sslGrades).sort()[0] || "N/A";
+          
+          var html = '<div class="stat-box"><div class="stat-number">' + totalDomains + '</div><div class="stat-label">Total Domains</div></div>';
+          html += '<div class="stat-box"><div class="stat-number" style="color:#28a745;">' + completed + '</div><div class="stat-label">Successful</div></div>';
+          html += '<div class="stat-box"><div class="stat-number" style="color:#dc3545;">' + failed + '</div><div class="stat-label">Failed</div></div>';
+          html += '<div class="stat-box"><div class="stat-number">' + avgPagespeed + '</div><div class="stat-label">Avg PageSpeed</div></div>';
+          html += '<div class="stat-box"><div class="stat-number">' + escapeHtml(topGrade) + '</div><div class="stat-label">Top SSL Grade</div></div>';
+          byId("summaryStats").innerHTML = html;
+          byId("resultCount").innerHTML = "(" + totalDomains + " domains)";
+        }
+
+        function fetchMultiResult(batchId) {
+          var url = API_BASE + "/multi-result?batch_id=" + encodeURIComponent(batchId);
+          xhrGetJson(
+            url,
+            function (j) {
+              if (j && j.ok) {
+                allResults = j.results || [];
+                renderResultsCards(allResults);
+                renderSummaryStats(allResults);
+                byId("summaryCard").style.display = "block";
+                byId("filterCard").style.display = "block";
+                byId("resultCard").style.display = "block";
+                setText("lastUpdated", "Last updated: " + new Date().toLocaleString());
+              } else {
+                byId("resultsGrid").innerHTML = '<div class="empty-state">No results returned from API.</div>';
+              }
+            },
+            function () {
+              byId("resultsGrid").innerHTML = '<div class="empty-state">❌ Failed to load results. Check API connection.</div>';
+            }
+          );
+        }
+
+        function pollStatus(batchId) {
+          var url = API_BASE + "/multi-status?batch_id=" + encodeURIComponent(batchId);
+          xhrGetJson(
+            url,
+            function (j) {
+              var pct = 0;
+              if (j && j.pct !== undefined && j.pct !== null) {
+                pct = parseInt(j.pct, 10);
+                if (isNaN(pct)) pct = 0;
+              }
+              if (pct < 0) pct = 0;
+              if (pct > 100) pct = 100;
+
+              var completed = formatValue(j.completed, "0");
+              var total = formatValue(j.total, "0");
+
+              var statusLine = "Batch running — " + completed + " / " + total + " complete";
+              if (j.status && j.status !== "") {
+                statusLine = statusLine + " — " + j.status;
+              }
+
+              setText("statusText", statusLine);
+              if (byId("progressFill")) byId("progressFill").style.width = pct + "%";
+              setText("pctText", pct + "%");
+              setBadge(false);
+
+              var logTail = j.log_tail ? String(j.log_tail) : "(waiting for output...)";
+              if (byId("logBox")) byId("logBox").innerHTML = escapeHtml(logTail);
+
+              if (j && (j.done === true || j.done === 1 || j.done === "1")) {
+                if (!batchIsDone) {
+                  batchIsDone = true;
+                  if (pollTimer) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                  }
+                  if (byId("progressFill")) byId("progressFill").className = "progress-fill done";
+                  if (byId("progressFill")) byId("progressFill").style.width = "100%";
+                  setText("statusText", "Batch complete!");
+                  setText("pctText", "100%");
+                  setBadge(true);
+                  if (byId("doneNotice")) byId("doneNotice").style.display = "block";
+                  if (byId("progressPanel")) byId("progressPanel").style.display = "none";
+                  fetchMultiResult(batchId);
+                }
+              }
+            },
+            function () {
+              setText("statusText", "Cannot reach server...");
+            }
+          );
+        }
+
+        function startPolling(batchId) {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+          pollStatus(batchId);
+          pollTimer = setInterval(function () {
+            pollStatus(batchId);
+          }, 5000);
+        }
+
+        function filterDomains() {
+          currentFilter = byId("filterInput").value;
+          renderResultsCards(allResults);
+        }
+
+        function exportToCSV() {
+          if (!allResults || allResults.length === 0) return;
+          var headers = ["Domain", "SSL Grade", "Sucuri", "PageSpeed", "Pingdom", "DNS", "Total Time", "IP Address", "Run At"];
+          var rows = [headers];
+          
+          var dataToExport = allResults;
+          if (currentFilter) {
+            dataToExport = allResults.filter(function(r) {
+              return (r.Domain || "").toLowerCase().includes(currentFilter.toLowerCase());
+            });
+          }
+          
+          for (var i = 0; i < dataToExport.length; i++) {
+            var r = dataToExport[i];
+            rows.push([
+              r.Domain || "",
+              r.SSL_Grade || "N/A",
+              r.Sucuri_Overall || "N/A",
+              r.PageSpeed_Performance || "N/A",
+              r.Pingdom_Grade || "N/A",
+              r.DNS_Propagation || "N/A",
+              r.Total_Time || "N/A",
+              r.Server_IP_Address || "N/A",
+              r.Run_At || ""
+            ]);
+          }
+          
+          var csvContent = rows.map(function(row) {
+            return row.map(function(cell) {
+              return '"' + String(cell).replace(/"/g, '""') + '"';
+            }).join(",");
+          }).join("\n");
+          
+          var blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+          var link = document.createElement("a");
+          var url = URL.createObjectURL(blob);
+          link.setAttribute("href", url);
+          link.setAttribute("download", "ssl_results_" + (AUTO_BATCH_ID || "batch") + ".csv");
+          link.style.visibility = "hidden";
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+        }
+
+        function copyToClipboard() {
+          if (!allResults || allResults.length === 0) return;
+          var jsonStr = JSON.stringify(allResults, null, 2);
+          navigator.clipboard.writeText(jsonStr).then(function() {
+            alert("✅ " + allResults.length + " domain results copied to clipboard!");
+          }).catch(function() {
+            alert("Failed to copy to clipboard");
+          });
+        }
+
+        function refreshResults() {
+          if (AUTO_BATCH_ID) {
+            fetchMultiResult(AUTO_BATCH_ID);
+          }
+        }
+
+        window.filterDomains = filterDomains;
+        window.exportToCSV = exportToCSV;
+        window.copyToClipboard = copyToClipboard;
+        window.refreshResults = refreshResults;
+
+        window.onload = function () {
+          setText("serverNameTag", getServerName());
+          setText("serverUrlTag", API_BASE);
+
+          if (!AUTO_BATCH_ID) {
+            setText("batchTag", "No batch ID provided");
+            setText("statusText", "Missing ?batch_id= parameter");
+            return;
+          }
+
+          setText("batchTag", AUTO_BATCH_ID);
+          setBadge(false);
+          setText("statusText", "Loading batch status...");
+          
+          // Show progress panel initially
+          if (byId("progressPanel")) byId("progressPanel").style.display = "block";
+          
+          startPolling(AUTO_BATCH_ID);
+        };
+      })();
+    </script>
+  </body>
+</html>

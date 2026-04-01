@@ -43,7 +43,7 @@ async function launchBrowser() {
       '--disable-renderer-backgrounding',
       '--js-flags=--max-old-space-size=128',
       '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-      '--single-process',
+      // '--single-process',
     ],
     protocolTimeout: 600000,
     timeout: 600000

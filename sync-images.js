@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("fs");
+const path = require("path");
 const { spawn } = require("child_process");
 
 function runCommand(command, args = []) {
@@ -26,18 +27,21 @@ function runCommand(command, args = []) {
 }
 
 async function syncDomainImages(domainDir, domain) {
+  const imagesDir = path.join(domainDir, 'images');
   const enabled = String(process.env.IMAGE_SYNC_ENABLED || "false").toLowerCase() === "true";
+
   if (!enabled) {
     return { skipped: true, reason: "IMAGE_SYNC_ENABLED is false" };
   }
 
-  if (!fs.existsSync(domainDir)) {
-    return { skipped: true, reason: `Missing folder: ${domainDir}` };
+  if (!fs.existsSync(imagesDir)) {
+    console.log(`[sync-images] No images folder found at: ${imagesDir}`);
+    return { skipped: true, reason: `Missing images folder: ${imagesDir}` };
   }
 
   const remoteHost    = process.env.IMAGE_SYNC_HOST;
   const remoteUser    = process.env.IMAGE_SYNC_USER;
-  const remoteBaseDir = process.env.IMAGE_SYNC_BASE_DIR || "/home/ind/images";
+  const remoteBaseDir = process.env.IMAGE_SYNC_BASE_DIR || "/home/ta1/public_html/images";
   const sshKeyPath    = process.env.IMAGE_SYNC_SSH_KEY  || "";
   const sshPort       = process.env.IMAGE_SYNC_SSH_PORT || "22";
   const useSudoRsync  = String(process.env.IMAGE_SYNC_SUDO || "false").toLowerCase() === "true";
@@ -48,33 +52,46 @@ async function syncDomainImages(domainDir, domain) {
 
   const remoteDomainDir = `${remoteBaseDir}/${domain}`;
 
-  // Build the SSH base command — includes port and optional key file
-  const sshBase = sshKeyPath
-    ? `ssh -i ${sshKeyPath} -p ${sshPort} -o StrictHostKeyChecking=no`
-    : `ssh -p ${sshPort} -o StrictHostKeyChecking=no`;
+  // Build SSH command cleanly without nested quote issues
+  const sshParts = ['ssh', '-p', sshPort, '-o', 'StrictHostKeyChecking=no'];
+  if (sshKeyPath) sshParts.push('-i', sshKeyPath);
+  const sshCmd = sshParts.join(' ');
 
-  // sudo rsync flag — needed when remote user doesn't own the target directory
-  const sudoFlag = useSudoRsync ? `--rsync-path="sudo rsync"` : "";
+  console.log(`[sync-images] Syncing ${imagesDir} -> ${remoteUser}@${remoteHost}:${remoteDomainDir}`);
 
-  // Create the remote domain folder first (also via sudo if needed)
-  const mkdirCmd = useSudoRsync
-    ? `${sshBase} ${remoteUser}@${remoteHost} "sudo mkdir -p '${remoteDomainDir}'"`
-    : `${sshBase} ${remoteUser}@${remoteHost} "mkdir -p '${remoteDomainDir}'"`;
+  try {
+    // Create remote directory
+    const mkdirArgs = useSudoRsync
+      ? ['-c', `${sshCmd} ${remoteUser}@${remoteHost} "sudo mkdir -p '${remoteDomainDir}'"`]
+      : ['-c', `${sshCmd} ${remoteUser}@${remoteHost} "mkdir -p '${remoteDomainDir}'"`];
 
-  await runCommand("bash", ["-lc", mkdirCmd]);
+    await runCommand("bash", mkdirArgs);
+    console.log(`[sync-images] Created remote directory: ${remoteDomainDir}`);
 
-  // Rsync only image files (png, jpg, jpeg, webp)
-  await runCommand("bash", [
-    "-lc",
-    `rsync -avz ${sudoFlag} --include='*/' --include='*.png' --include='*.jpg' --include='*.jpeg' --include='*.webp' --exclude='*' -e "${sshBase}" "${domainDir}/" "${remoteUser}@${remoteHost}:${remoteDomainDir}/"`
-  ]);
+    const imageFiles = fs.readdirSync(imagesDir).filter(f =>
+      ['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(f).toLowerCase())
+    );
 
-  return {
-    success: true,
-    remoteHost,
-    remoteDomainDir,
-    domain,
-  };
+    // Sync with so re-scans cleanly override old images
+    const rsyncPath = useSudoRsync ? `--rsync-path='sudo rsync'` : '';
+    const rsyncCmd = `rsync -avz  ${rsyncPath} -e '${sshCmd}' "${imagesDir}/" "${remoteUser}@${remoteHost}:${remoteDomainDir}/"`;
+
+    await runCommand("bash", ["-c", rsyncCmd]);
+
+    console.log(`[sync-images] ✅ Successfully synced images for ${domain}`);
+
+    return {
+      success: true,
+      remoteHost,
+      remoteDomainDir,
+      domain,
+      baseUrl: process.env.IMAGE_SYNC_BASE_URL,
+      imageCount: imageFiles.length
+    };
+  } catch (err) {
+    console.error(`[sync-images] ❌ Failed to sync images for ${domain}:`, err.message);
+    throw err;
+  }
 }
 
 module.exports = { syncDomainImages };

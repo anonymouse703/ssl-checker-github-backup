@@ -3,7 +3,7 @@
 const puppeteer = require('puppeteer');
 const { resolveChromePath } = require('./chrome-path');
 
-const POOL_SIZE = Math.min(parseInt(process.env.BROWSER_POOL_SIZE || '2', 10), 2);
+const POOL_SIZE = Math.max(1, parseInt(process.env.BROWSER_POOL_SIZE || '2', 10));
 const DEFAULT_TIMEOUT_MS = parseInt(process.env.BROWSER_POOL_TIMEOUT_MS || '600000', 10);
 const IDLE_TIMEOUT_MS = parseInt(process.env.BROWSER_IDLE_TIMEOUT_MS || '300000', 10);
 
@@ -27,7 +27,7 @@ const LAUNCH_ARGS = [
   '--disable-renderer-backgrounding',
   '--js-flags=--max-old-space-size=256',
   '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-  '--single-process',
+  // '--single-process',
   '--disable-accelerated-2d-canvas',
   '--disable-accelerated-jpeg-decoding',
   '--disable-accelerated-mjpeg-decode',

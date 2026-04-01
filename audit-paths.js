@@ -1,81 +1,99 @@
 'use strict';
 
-const fs   = require('fs');
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-/** Root folder where dated scan folders are created. */
-const SCAN_ROOT = '/home/ind';
-
-/** Folder where the merged summary CSV is written. */
-const INPUTS_DIR = '/home/ind/ind_leads_inputs';
-
-/** Tool install location. */
-const TOOL_DIR = '/usr/local/ind_leads/ssl-checker-tool';
+const SCAN_ROOT = process.env.SCAN_ROOT || '/home/ind';
+const INPUTS_DIR = process.env.OUTPUT_DIR || '/home/ind/ind_leads_inputs';
+const TOOL_DIR = process.env.TOOL_DIR || '/usr/local/ind_leads/ssl-checker-tool';
 
 /**
  * Resolve (or create) the batch output folder.
- *
- * Old behaviour: date + incrementing suffix (2026-03-20, 2026-03-20-2, …)
- *   ⚠ Race condition: two PCs reading the FS at the same instant both pick -2.
- *
- * New behaviour: date + millisecond timestamp + 4-char random hex suffix.
- *   e.g. 2026-03-20_1711900123456_a3f9
- *   Collision probability ≈ 0 even with 15 concurrent PCs.
- *
- * If existingPath is provided (passed via SCAN_BATCH_PATH env var from
- * multi-audit.js or api-server.js) it is returned unchanged — all child
- * processes in a batch share the same pre-resolved path.
+ * Creates a unique folder name with date + timestamp + random hex
+ * Format: YYYY-MM-DD_timestamp_random
+ * Example: 2026-03-28_1743214567890_a3f9
  */
 function resolveBatchPath(existingPath) {
-  if (existingPath) return existingPath;
+  if (existingPath) {
+    console.log(`[audit-paths] Using existing batch path: ${existingPath}`);
+    return existingPath;
+  }
 
-  const now   = new Date();
-  const year  = String(now.getFullYear());
+  const now = new Date();
+  const year = String(now.getFullYear());
   const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day   = String(now.getDate()).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
 
-  const dateStr  = `${year}-${month}-${day}`;
-  const tsMs     = Date.now();
-  const randHex  = crypto.randomBytes(2).toString('hex'); // 4 chars, e.g. "a3f9"
-  const folder   = `${dateStr}_${tsMs}_${randHex}`;
+  const dateStr = `${year}-${month}-${day}`;
+  const tsMs = Date.now();
+  const randHex = crypto.randomBytes(2).toString('hex');
+  const folder = `${dateStr}_${tsMs}_${randHex}`;
 
-  return path.join(SCAN_ROOT, folder);
+  const batchPath = path.join(SCAN_ROOT, folder);
+  console.log(`[audit-paths] Created new batch path: ${batchPath}`);
+
+  return batchPath;
 }
 
 /**
  * Extract the date portion from a batch root folder name.
- * Works for both old format (2026-03-20) and new (2026-03-20_ts_rand).
+ * Works for format: 2026-03-20_timestamp_random
  */
 function dateFromBatchRoot(batchRoot) {
   const base = path.basename(batchRoot);
-  const m    = base.match(/^(\d{4}-\d{2}-\d{2})/);
+  const m = base.match(/^(\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : base;
 }
 
 /**
- * Return all well-known paths for a domain inside a batch folder.
+ * Paths for one domain inside one batch.
  *
- * summaryPath — the per-batch summary CSV written by csv-writer.js.
- *   One summary per batch folder (not one global file) so concurrent
- *   batches from different PCs each get their own summary.
+ * Result structure:
+ *   batchRoot/
+ *     summary.csv                 <-- batch summary
+ *     _batch_stats.json
+ *     example.com/
+ *       example.com_results.csv   <-- full per-domain CSV
+ *       summary.csv               <-- per-domain summary (same as domain CSV)
+ *       images/                   <-- screenshots folder
+ *         ssl.png
+ *         intodns.png
+ *         pagespeed.png
+ *         pingdom.png
+ *         sucuri.png
  */
 function domainPaths(batchRoot, domain) {
-  const domainDir  = path.join(batchRoot, domain);
-  const imagesDir  = domainDir;
-  const csvPath    = path.join(domainDir, `${domain}_results.csv`);
-  const dateStr    = dateFromBatchRoot(batchRoot);
-  // summary lives inside the batch folder — not in INPUTS_DIR — so two
-  // concurrent batches never write to the same summary.csv.
-  const summaryPath = path.join(batchRoot, 'summary.csv');
+  const domainDir    = path.join(batchRoot, domain);
+  const imagesDir    = path.join(domainDir, 'images');
+  const csvPath      = path.join(domainDir, `${domain}_results.csv`);
+  const domainSummaryPath  = path.join(domainDir, 'summary.csv');
+  const batchSummaryPath   = path.join(batchRoot, 'summary.csv');
+  const statsPath          = path.join(batchRoot, '_batch_stats.json');
 
-  return { domainDir, imagesDir, csvPath, summaryPath, batchRoot };
+  return {
+    domainDir,
+    imagesDir,
+    csvPath,
+    domainSummaryPath,
+    batchSummaryPath,
+    statsPath,
+    batchRoot,
+  };
 }
 
 function ensureDomainDirs(paths) {
-  [paths.domainDir, INPUTS_DIR].forEach((dir) => {
+  const dirs = [
+    paths.batchRoot,
+    paths.domainDir,
+    paths.imagesDir,
+    INPUTS_DIR,
+  ];
+
+  dirs.forEach((dir) => {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
+      console.log(`[audit-paths] Created directory: ${dir}`);
     }
   });
 }
