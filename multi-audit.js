@@ -287,96 +287,105 @@ async function updateLatestForDomain(domain) {
 }
 
 // ── Run a single domain audit ─────────────────────────────────────────────────
-function runAudit(domain, groupNum, posInGroup) {
-    return new Promise((resolve) => {
-        const start = Date.now();
-        const label = `[G${groupNum}-D${posInGroup + 1}]`.padEnd(12);
-        
-        const sslDelayMs = posInGroup * CONFIG.SSL_STAGGER_SEC * 1000;
 
-        console.log(`${label} 🚀 ${domain}`);
-        console.log(`${label}    📁 ${path.join(batchFolder, domain)}/`);
-        if (sslDelayMs > 0) {
-            console.log(`${label}    🔒 SSL checks will start in ${sslDelayMs/1000}s (stagger)`);
+const FORCE_RESCAN = String(process.env.FORCE_RESCAN || '0') === '1';
+
+function runAudit(domain, groupNum, posInGroup) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const label = `[G${groupNum}-D${posInGroup + 1}]`.padEnd(12);
+    const sslDelayMs = posInGroup * CONFIG.SSL_STAGGER_SEC * 1000;
+
+    console.log(`${label} 🚀 ${domain}`);
+    console.log(`${label}    📁 ${path.join(batchFolder, domain)}/`);
+    if (sslDelayMs > 0) {
+      console.log(`${label}    🔒 SSL checks will start in ${sslDelayMs / 1000}s (stagger)`);
+    }
+
+    const childJobId = `${JOB_ID}_${domain.replace(/[^a-z0-9._-]/gi, '_')}`;
+
+    const child = spawn('node', ['index.js', domain], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        SCAN_BATCH_PATH,
+        SSL_QUEUE_DELAY_MS: String(sslDelayMs),
+        BATCH_MODE: 'true',
+        JOB_ID: childJobId,
+        // DO NOT set DOMAIN_LOCK_ALREADY_HELD – child will acquire its own lock
+        ENABLED_TOOLS: process.env.ENABLED_TOOLS || '[]',
+        NODE_OPTIONS: '--max-old-space-size=256',
+        FORCE_RESCAN: FORCE_RESCAN ? '1' : '0',
+      }
+    });
+
+    console.log(`__DOMAIN_START__:${domain}:${child.pid}:${childJobId}`);
+
+    child.stdout.on('data', (data) => {
+      String(data).split('\n').forEach(line => {
+        const t = line.trim();
+        if (!t) return;
+
+        if (t.includes('SSL ⏳ Capacity')) {
+          results.errors.sslLabs++;
+          results.errors.sslLabsDetails[domain] = (results.errors.sslLabsDetails[domain] || 0) + 1;
         }
 
-        const childJobId = `${JOB_ID}_${domain.replace(/[^a-z0-9._-]/gi, '_')}`;
-        
-        const child = spawn('node', ['index.js', domain], {
-            cwd: __dirname,
-            env: {
-                ...process.env,
-                SCAN_BATCH_PATH,
-                SSL_QUEUE_DELAY_MS: String(sslDelayMs),
-                BATCH_MODE: 'true',
-                JOB_ID: childJobId,
-                DOMAIN_LOCK_ALREADY_HELD: '1',
-                // Memory limit per child process
-                NODE_OPTIONS: '--max-old-space-size=256',
-            }
-        });
+        if (t.includes('GTmetrix') && (t.includes('403') || t.includes('444'))) {
+          results.errors.gtmetrix++;
+          (results.errors.gtmetrixDetails[domain] = results.errors.gtmetrixDetails[domain] || []).push(t);
+        }
 
-        console.log(`__DOMAIN_START__:${domain}:${child.pid}:${childJobId}`);
-
-        child.stdout.on('data', (data) => {
-            String(data).split('\n').forEach(line => {
-                const t = line.trim();
-                if (!t) return;
-                if (t.includes('SSL ⏳ Capacity')) {
-                    results.errors.sslLabs++;
-                    results.errors.sslLabsDetails[domain] = (results.errors.sslLabsDetails[domain] || 0) + 1;
-                }
-                if (t.includes('GTmetrix') && (t.includes('403') || t.includes('444'))) {
-                    results.errors.gtmetrix++;
-                    (results.errors.gtmetrixDetails[domain] = results.errors.gtmetrixDetails[domain] || []).push(t);
-                }
-                console.log(`${label} ${t}`);
-            });
-        });
-
-        child.stderr.on('data', (data) => {
-            String(data).split('\n').forEach(line => {
-                const t = line.trim();
-                if (t) console.error(`${label} ⚠️  ${t}`);
-            });
-        });
-
-        child.on('close', async (code) => {
-            const elapsed = Math.round((Date.now() - start) / 1000);
-            const finishTime = new Date().toLocaleString('en-US', {
-                month: '2-digit', day: '2-digit', year: 'numeric',
-                hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true
-            });
-
-            if (code === 0) {
-                results.completed.push(domain);
-                console.log(`${label} ✅ ${Math.floor(elapsed/60)}m ${elapsed%60}s → ${path.join(batchFolder, domain)}/`);
-                await updateLatestForDomain(domain);
-            } else {
-                results.failed.push(domain);
-                console.log(`${label} ❌ Failed in ${Math.floor(elapsed/60)}m ${elapsed%60}s`);
-            }
-
-            const doneCount = results.completed.length + results.failed.length;
-            const statusLine = code === 0
-                ? `✅ ${domain} — finished at ${finishTime}`
-                : `❌ ${domain} — failed at ${finishTime}`;
-            writeProgress(doneCount, total, domain, finishTime, statusLine);
-            console.log(`${label} 📊 Progress: ${doneCount}/${total} (${results.completed.length} OK, ${results.failed.length} failed)`);
-            console.log(`__DOMAIN_DONE__:${domain}:${code}`);
-
-            resolve();
-        });
-
-        child.on('error', (err) => {
-            console.error(`${label} ❌ ${err.message}`);
-            results.failed.push(domain);
-            const doneCount = results.completed.length + results.failed.length;
-            writeProgress(doneCount, total, domain, new Date().toLocaleString(), `❌ ${domain} failed`);
-            console.log(`__DOMAIN_DONE__:${domain}:1`);
-            resolve();
-        });
+        console.log(`${label} ${t}`);
+      });
     });
+
+    child.stderr.on('data', (data) => {
+      String(data).split('\n').forEach(line => {
+        const t = line.trim();
+        if (t) console.error(`${label} ⚠️  ${t}`);
+      });
+    });
+
+    child.on('close', async (code) => {
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      const finishTime = new Date().toLocaleString('en-US', {
+        month: '2-digit',
+        day: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+      });
+
+      if (code === 0) {
+        results.completed.push(domain);
+        console.log(`${label} ✅ ${Math.floor(elapsed / 60)}m ${elapsed % 60}s → ${path.join(batchFolder, domain)}/`);
+        await updateLatestForDomain(domain);
+      } else {
+        results.failed.push(domain);
+        console.log(`${label} ❌ Failed in ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`);
+      }
+
+      const doneCount = results.completed.length + results.failed.length;
+
+      writeProgress(
+        doneCount,
+        total,
+        domain,
+        finishTime,
+        code === 0 ? `RUNNING — completed ${domain}` : `RUNNING — failed ${domain}`
+      );
+
+      resolve({
+        domain,
+        code,
+        elapsed,
+        success: code === 0,
+      });
+    });
+  });
 }
 
 // ── Main execution ────────────────────────────────────────────────────────────

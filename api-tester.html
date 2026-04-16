@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <title>SSL Checker — Live Progress</title>
     <style>
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
         padding: 14px;
@@ -12,30 +15,25 @@
         font-family: Arial, Helvetica, sans-serif;
         font-size: 13px;
       }
-
       .page-title {
         font-size: 16px;
         font-weight: bold;
         margin: 0 0 10px 0;
       }
-
       .panel {
-        background: #ffffff;
+        background: #fff;
         border: 1px solid #d8d8d8;
         border-radius: 10px;
         padding: 14px 18px;
         margin-bottom: 12px;
       }
-
       .scan-row {
         line-height: 28px;
       }
-
       .muted {
-        color: #666666;
+        color: #666;
         font-size: 12px;
       }
-
       .domain-pill {
         display: inline-block;
         padding: 3px 12px;
@@ -46,7 +44,6 @@
         margin-left: 8px;
         margin-right: 8px;
       }
-
       .server-pill {
         display: inline-block;
         padding: 3px 12px;
@@ -57,7 +54,6 @@
         margin-left: 8px;
         margin-right: 4px;
       }
-
       .status-pill {
         display: inline-block;
         padding: 3px 12px;
@@ -65,25 +61,21 @@
         font-size: 12px;
         font-weight: bold;
         background: #185fa5;
-        color: #ffffff;
+        color: #fff;
       }
-
       .section-title {
         font-size: 14px;
         font-weight: bold;
         margin: 0 0 10px 0;
       }
-
       .status-text {
         margin-bottom: 6px;
         color: #4b4b4b;
       }
-
       .progress-wrap {
         position: relative;
         margin-top: 2px;
       }
-
       .progress-bar {
         width: 100%;
         height: 9px;
@@ -91,38 +83,66 @@
         border-radius: 20px;
         overflow: hidden;
       }
-
       .progress-fill {
         width: 0%;
         height: 9px;
         background: #1f78d1;
+        transition: width 0.3s;
       }
-
       .progress-fill.done {
         background: #1f8b3a;
       }
 
       .progress-pct {
         text-align: right;
-        color: #777777;
+        color: #777;
         font-size: 11px;
         margin-top: 4px;
       }
 
-      .console-label {
-        color: #666666;
+      .log-container {
+        margin-top: 12px;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #1e1e1e;
+      }
+      .log-header {
+        background: #2d2d2d;
+        padding: 7px 12px;
+        border-bottom: 1px solid #3d3d3d;
         font-size: 12px;
-        margin-top: 10px;
-        margin-bottom: 6px;
+        font-weight: 600;
+        color: #e0e0e0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .log-controls {
+        display: flex;
+        gap: 6px;
+      }
+      .log-controls button {
+        height: 24px;
+        padding: 0 10px;
+        font-size: 10px;
+        background: #3d3d3d;
+        border: 1px solid #555;
+        border-radius: 4px;
+        cursor: pointer;
+        color: #e0e0e0;
+      }
+      .log-controls button:hover {
+        background: #4d4d4d;
       }
 
       .console-box {
-        background: #17191d;
+        background: #1e1e1e;
         color: #f2f2f2;
-        border-radius: 8px;
-        padding: 14px 16px;
+        border-radius: 0;
+        padding: 12px;
         min-height: 132px;
-        max-height: 700px;
+        max-height: 400px;
         overflow: auto;
         white-space: pre-wrap;
         word-wrap: break-word;
@@ -142,53 +162,108 @@
         font-weight: bold;
       }
 
-      .done-icon {
-        color: #35a853;
-        margin-right: 6px;
-      }
-
       .results-panel {
         display: none;
       }
 
-      .results-grid {
-        width: 100%;
-        border-collapse: separate;
-        border-spacing: 8px;
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin: 0 0 12px 0;
+        flex-wrap: wrap;
       }
-
-      .metric-cell {
+      .tab-btn {
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid #ccc;
+        border-radius: 6px;
         background: #f7f7f7;
-        border: 1px solid #ececec;
-        border-radius: 8px;
-        padding: 12px 14px;
-        width: 33.33%;
-        vertical-align: top;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .tab-btn.active {
+        background: #185fa5;
+        color: #fff;
+        border-color: #185fa5;
+      }
+      .tab-panel {
+        display: none;
+      }
+      .tab-panel.active {
+        display: block;
       }
 
-      .metric-value {
-        font-size: 16px;
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .metric {
+        background: #f5f5f5;
+        border-radius: 8px;
+        padding: 10px 12px;
+        border: 1px solid #e0e0e0;
+      }
+      .metric-val {
+        font-size: 18px;
         font-weight: bold;
-        color: #111111;
+        color: #185fa5;
         line-height: 1.2;
         margin-bottom: 4px;
       }
+      .metric-lbl {
+        font-size: 11px;
+        color: #888;
+      }
 
-      .metric-label {
-        font-size: 12px;
-        color: #7b7b7b;
+      .img-tool-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+      .img-tab-btn {
+        height: 28px;
+        padding: 0 12px;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        background: #f7f7f7;
+        cursor: pointer;
+        font-size: 11px;
+      }
+      .img-tab-btn:hover {
+        background: #eee;
+      }
+      .img-tab-btn.active {
+        background: #185fa5;
+        color: #fff;
+        border-color: #185fa5;
+      }
+      .img-tab-panel {
+        display: none;
+      }
+      .img-tab-panel.active {
+        display: block;
+      }
+      .img-tab-panel img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        background: #fff;
       }
     </style>
   </head>
   <body>
     <div class="page-title">SSL Checker — Live Progress</div>
 
-    <!-- Server info card -->
-    <div class="panel" style="padding: 10px 18px; margin-bottom: 12px;">
+    <div class="panel" style="padding: 10px 18px; margin-bottom: 12px">
       <div class="scan-row">
         <span class="muted">Scanning on server:</span>
         <span class="server-pill" id="serverNameTag">—</span>
-        <span class="muted" id="serverUrlTag" style="font-size: 11px;"></span>
+        <span class="muted" id="serverUrlTag" style="font-size: 11px"></span>
       </div>
     </div>
 
@@ -203,7 +278,6 @@
     <div class="panel" id="progressPanel">
       <div class="section-title">Live progress</div>
       <div class="status-text" id="statusText">Waiting...</div>
-
       <div class="progress-wrap">
         <div class="progress-bar">
           <div class="progress-fill" id="progressFill"></div>
@@ -211,272 +285,379 @@
         <div class="progress-pct" id="pctText">0%</div>
       </div>
 
-      <div class="console-label">Console log (last 50 lines)</div>
-      <div class="console-box" id="logBox">(waiting for output...)</div>
+      <div class="log-container">
+        <div class="log-header">
+          <span>📋 Console log</span>
+          <div class="log-controls">
+            <button onclick="clearLog()">Clear</button>
+            <button onclick="copyLog(event)">Copy</button>
+            <button onclick="toggleAutoScroll(event)">Auto-scroll: ON</button>
+          </div>
+        </div>
+        <div class="console-box" id="logBox">(waiting for output...)</div>
+      </div>
     </div>
 
     <div class="done-banner" id="doneNotice">
-      <span class="done-icon">&#10004;</span>Scan complete! Click FETCH RESULT
-      in FileMaker to save the data.
+      <span>&#10004;</span> Scan complete!
     </div>
 
     <div class="panel results-panel" id="resultCard">
-      <div class="section-title">Quick results</div>
+      <div class="section-title">Results</div>
+      <div class="tabs">
+        <button
+          type="button"
+          class="tab-btn active"
+          onclick="showTab('tabSummary', this)"
+        >
+          Summary
+        </button>
+        <button
+          type="button"
+          class="tab-btn"
+          onclick="showTab('tabScreenshots', this)"
+        >
+          Screenshots
+        </button>
+        <button
+          type="button"
+          class="tab-btn"
+          onclick="showTab('tabJson', this)"
+        >
+          JSON
+        </button>
+      </div>
 
-      <table class="results-grid">
-        <tr>
-          <td class="metric-cell">
-            <div class="metric-value" id="m_ssl">N/A</div>
-            <div class="metric-label">SSL Grade</div>
-          </td>
-          <td class="metric-cell">
-            <div class="metric-value" id="m_sucuri">N/A</div>
-            <div class="metric-label">Sucuri</div>
-          </td>
-          <td class="metric-cell">
-            <div class="metric-value" id="m_pagespeed">N/A</div>
-            <div class="metric-label">PageSpeed</div>
-          </td>
-        </tr>
-        <tr>
-          <td class="metric-cell">
-            <div class="metric-value" id="m_pingdom">N/A</div>
-            <div class="metric-label">Pingdom</div>
-          </td>
-          <td class="metric-cell">
-            <div class="metric-value" id="m_dns">N/A</div>
-            <div class="metric-label">DNS</div>
-          </td>
-          <td class="metric-cell">
-            <div class="metric-value" id="m_total">N/A</div>
-            <div class="metric-label">Total time</div>
-          </td>
-        </tr>
-      </table>
+      <div id="tabSummary" class="tab-panel active">
+        <div class="metric-grid" id="metricGrid"></div>
+      </div>
+
+      <div id="tabScreenshots" class="tab-panel">
+        <div class="img-tool-tabs" id="imgToolTabs"></div>
+        <div id="imgToolPanels"></div>
+      </div>
+
+      <div id="tabJson" class="tab-panel">
+        <pre
+          id="resultBox"
+          style="max-height: 300px; overflow: auto; font-size: 11px"
+        ></pre>
+      </div>
     </div>
 
-    <script type="text/javascript">
+    <script>
       (function () {
-        var AUTO_DOMAIN = getQueryParam("domain");
+        var AUTO_DOMAIN = getParam("domain");
         var API_BASE = window.location.protocol + "//" + window.location.host;
         var pollTimer = null;
+        var autoScroll = true;
         var scanIsDone = false;
+        var resultRendered = false;
+        var JOB_ID = getParam("job_id");
 
         function byId(id) {
           return document.getElementById(id);
         }
 
-        function getQueryParam(name) {
-          var qs = window.location.search;
-          var query = "";
-          var parts, i, pair, key, value;
-
-          if (qs && qs.length > 1) {
-            query = qs.substring(1);
+        function getParam(name) {
+          var qs = window.location.search.substring(1);
+          var parts = qs.split("&");
+          for (var i = 0; i < parts.length; i++) {
+            var pair = parts[i].split("=");
+            if (decodeURIComponent(pair[0]) === name)
+              return decodeURIComponent((pair[1] || "").replace(/\+/g, " "));
           }
-
-          if (!query) {
-            return "";
-          }
-
-          parts = query.split("&");
-
-          for (i = 0; i < parts.length; i++) {
-            pair = parts[i].split("=");
-            key = decodeURIComponent(pair[0] || "");
-            value = decodeURIComponent((pair[1] || "").replace(/\+/g, " "));
-            if (key === name) {
-              return value;
-            }
-          }
-
           return "";
         }
 
         function escapeHtml(str) {
-          if (str === null || str === undefined) {
-            return "";
-          }
+          if (str == null) return "";
           return String(str)
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;");
         }
 
-        function setText(id, value) {
-          byId(id).innerHTML = escapeHtml(value);
+        function setText(id, val) {
+          byId(id).innerHTML = escapeHtml(val);
         }
 
-        function nvl(value, fallback) {
-          if (value === null || value === undefined || value === "") {
-            return fallback;
-          }
-          return value;
+        function clearLog() {
+          byId("logBox").textContent = "(log cleared)";
         }
 
-        // Resolve server name — prefers ?server_name= from FileMaker,
-        // falls back to IP/hostname map if opened directly in browser
+        function copyLog(ev) {
+          navigator.clipboard
+            .writeText(byId("logBox").textContent)
+            .then(function () {
+              var btn = ev.target;
+              var orig = btn.textContent;
+              btn.textContent = "Copied!";
+              setTimeout(function () {
+                btn.textContent = orig;
+              }, 1500);
+            });
+        }
+
+        function toggleAutoScroll(ev) {
+          autoScroll = !autoScroll;
+          ev.target.textContent = autoScroll
+            ? "Auto-scroll: ON"
+            : "Auto-scroll: OFF";
+        }
+
+        function showTab(tabId, btn) {
+          document.querySelectorAll(".tab-panel").forEach(function (el) {
+            el.classList.remove("active");
+          });
+          document.querySelectorAll(".tab-btn").forEach(function (el) {
+            el.classList.remove("active");
+          });
+          byId(tabId).classList.add("active");
+          btn.classList.add("active");
+        }
+        window.showTab = showTab;
+
+        function showImgTab(key, btn) {
+          document.querySelectorAll(".img-tab-btn").forEach(function (b) {
+            b.classList.remove("active");
+          });
+          document.querySelectorAll(".img-tab-panel").forEach(function (p) {
+            p.classList.remove("active");
+          });
+          btn.classList.add("active");
+          var panel = byId("imgPanel_" + key);
+          if (panel) panel.classList.add("active");
+        }
+        window.showImgTab = showImgTab;
+
         function getServerName() {
-          var fromParam = getQueryParam("server_name");
-          var cleaned = "";
-
-          if (fromParam) {
-            cleaned = String(fromParam).trim();
-
-            cleaned = cleaned.replace(/%20/g, " ");
-            cleaned = cleaned.replace(/^VM\/20([1-9])$/i, "VM $1");
-            cleaned = cleaned.replace(/^VM\/([1-9])$/i, "VM $1");
-
-            return cleaned;
-          }
-
-          return "";
+          var p = getParam("server_name");
+          return p ? String(p).trim().replace(/%20/g, " ") : "";
         }
 
-        function setBadge(done) {
-          var badge = byId("scanStatusBadge");
-          if (done) {
-            badge.style.background = "#185fa5";
-            badge.style.color = "#ffffff";
-            badge.innerHTML = "Done";
-          } else {
-            badge.style.background = "#185fa5";
-            badge.style.color = "#ffffff";
-            badge.innerHTML = "Scanning...";
-          }
+        function setBadgeState(text) {
+          byId("scanStatusBadge").innerHTML = escapeHtml(text);
+        }
+
+        function markScanCompleteState() {
+          scanIsDone = true;
+          setBadgeState("Done");
+          byId("progressFill").style.width = "100%";
+          byId("progressFill").className = "progress-fill done";
+          setText("pctText", "100%");
+          setText("statusText", "Scan complete!");
+          byId("doneNotice").style.display = "block";
         }
 
         function xhrGetJson(url, okFn, errFn) {
           var xhr = new XMLHttpRequest();
           xhr.open("GET", url, true);
           xhr.onreadystatechange = function () {
-            var data;
             if (xhr.readyState === 4) {
               if (xhr.status >= 200 && xhr.status < 300) {
                 try {
-                  data = JSON.parse(xhr.responseText);
-                  okFn(data);
+                  okFn(JSON.parse(xhr.responseText));
                 } catch (e) {
-                  if (errFn) {
-                    errFn(e);
-                  }
+                  if (errFn) errFn(e);
                 }
               } else {
-                if (errFn) {
-                  errFn(xhr.status);
-                }
+                if (errFn) errFn(xhr.status);
               }
             }
           };
           xhr.send(null);
         }
 
-        function formatResultValue(value, fallback) {
-          if (value === null || value === undefined || value === "") {
-            return fallback;
-          }
-          return String(value);
+        function xhrGetText(url, okFn, errFn) {
+          var xhr = new XMLHttpRequest();
+          xhr.open("GET", url, true);
+          xhr.onreadystatechange = function () {
+            if (xhr.readyState === 4) {
+              if (xhr.status >= 200 && xhr.status < 300) okFn(xhr.responseText);
+              else if (errFn) errFn(xhr.status);
+            }
+          };
+          xhr.send(null);
         }
 
-        function fetchResult(domain) {
-          var url = API_BASE + "/result?domain=" + encodeURIComponent(domain);
+        function renderImages(d) {
+          var cards = [
+            { key: "ssl", label: "SSL Lab", url: d.SSL_Screenshot },
+            { key: "sucuri", label: "Sucuri", url: d.Sucuri_Screenshot },
+            {
+              key: "pagespeed",
+              label: "PageSpeed",
+              url: d.PageSpeed_Screenshot,
+            },
+            { key: "pingdom", label: "Pingdom", url: d.Pingdom_Screenshot },
+            { key: "dns", label: "DNS", url: d.DNS_Screenshot },
+            { key: "pagerank", label: "PageRank", url: d.PageRank_Screenshot },
+            { key: "server", label: "Server", url: d.Server_Screenshot },
+            { key: "intodns", label: "IntoDNS", url: d.IntoDNS_Screenshot },
+          ].filter(function (x) {
+            return x.url && x.url !== "none" && x.url !== "";
+          });
 
+          var tabBar = byId("imgToolTabs");
+          var panelBox = byId("imgToolPanels");
+
+          if (!cards.length) {
+            tabBar.innerHTML = "";
+            panelBox.innerHTML =
+              '<div style="font-size:12px;color:#888;padding:8px 0">No screenshots available.</div>';
+            return;
+          }
+
+          tabBar.innerHTML = cards
+            .map(function (c, i) {
+              return (
+                '<button type="button" class="img-tab-btn' +
+                (i === 0 ? " active" : "") +
+                '" onclick="showImgTab(\'' +
+                c.key +
+                "',this)\">" +
+                c.label +
+                "</button>"
+              );
+            })
+            .join("");
+
+          panelBox.innerHTML = cards
+            .map(function (c, i) {
+              return (
+                '<div id="imgPanel_' +
+                c.key +
+                '" class="img-tab-panel' +
+                (i === 0 ? " active" : "") +
+                '">' +
+                '<a href="' +
+                escapeHtml(c.url) +
+                '" target="_blank">' +
+                '<img src="' +
+                escapeHtml(c.url) +
+                '" alt="' +
+                c.label +
+                '" loading="lazy">' +
+                "</a>" +
+                '<div style="font-size:11px;color:#888;text-align:right;margin-top:6px">Click image to open full size ↗</div>' +
+                "</div>"
+              );
+            })
+            .join("");
+        }
+
+        function renderResult(d) {
+          resultRendered = true;
+
+          byId("metricGrid").innerHTML =
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.SSL_Grade || "N/A") +
+            '</div><div class="metric-lbl">SSL Grade</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.Sucuri_Overall || d.Sucuri_Result || "N/A") +
+            '</div><div class="metric-lbl">Sucuri</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.PageSpeed_Performance || "N/A") +
+            '</div><div class="metric-lbl">PageSpeed</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.Pingdom_Grade || "N/A") +
+            '</div><div class="metric-lbl">Pingdom</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.DNS_PropagationRate || d.DNS_Propagation || "N/A") +
+            '</div><div class="metric-lbl">DNS</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.PageRank_Integer || "N/A") +
+            '</div><div class="metric-lbl">PageRank</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.Server_IP_Address || d.Server_IP || "N/A") +
+            '</div><div class="metric-lbl">Server IP</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.IntoDNS_OverallHealth || d.IntoDNS_Health || "N/A") +
+            '</div><div class="metric-lbl">IntoDNS</div></div>';
+
+          renderImages(d);
+          byId("resultBox").textContent = JSON.stringify(d, null, 2);
+
+          markScanCompleteState();
+          byId("progressPanel").style.display = "none";
+          byId("resultCard").style.display = "block";
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        }
+
+        function fetchResultIfAvailable(domain, okFn, notReadyFn) {
           xhrGetJson(
-            url,
+            API_BASE + "/result?domain=" + encodeURIComponent(domain),
             function (j) {
-              var d;
               if (j && j.ok && j.data) {
-                d = j.data;
-
-                setText("m_ssl", formatResultValue(d.SSL_Grade, "N/A"));
-                setText("m_sucuri", formatResultValue(d.Sucuri_Overall, "N/A"));
-                setText(
-                  "m_pagespeed",
-                  formatResultValue(d.PageSpeed_Performance, "N/A")
-                );
-                setText("m_pingdom", formatResultValue(d.Pingdom_Grade, "N/A"));
-                setText("m_dns", formatResultValue(d.DNS_Propagation, "N/A"));
-                setText("m_total", formatResultValue(d.Total_Time, "N/A"));
-
-                byId("resultCard").style.display = "block";
+                renderResult(j.data);
+                if (okFn) okFn(j.data);
+              } else {
+                if (notReadyFn) notReadyFn();
               }
             },
-            function () {}
+            function () {
+              if (notReadyFn) notReadyFn();
+            },
           );
         }
 
-        function buildConsoleText(statusJson) {
-          var text = "";
-          var logLines = [];
-          var i;
-
-          if (statusJson && statusJson.log_tail) {
-            logLines = String(statusJson.log_tail).split("\n");
-            if (logLines.length > 50) {
-              logLines = logLines.slice(logLines.length - 50);
-            }
-            text = logLines.join("\n");
-          }
-
-          if (!text) {
-            text = "(waiting for output...)";
-          }
-
-          return text;
-        }
-
         function pollStatus(domain) {
-          var url = API_BASE + "/status?domain=" + encodeURIComponent(domain);
+          if (!JOB_ID) {
+            fetchResultIfAvailable(
+              domain,
+              function () {},
+              function () {
+                setText("statusText", "Missing job_id parameter");
+              },
+            );
+            return;
+          }
 
           xhrGetJson(
-            url,
+            API_BASE + "/progress?job_id=" + encodeURIComponent(JOB_ID),
             function (j) {
-              var pct = 0;
-              var fill;
+              var p = j && j.progress ? j.progress : {};
+              var completed = parseInt(p.completed || "0", 10);
+              var total = parseInt(p.total || "1", 10) || 1;
+              var pct = Math.round((completed / total) * 100);
+              var status = p.status || "";
 
-              if (j && j.pct !== undefined && j.pct !== null) {
-                pct = parseInt(j.pct, 10);
-                if (isNaN(pct)) {
-                  pct = 0;
-                }
-              }
-
-              if (pct < 0) pct = 0;
-              if (pct > 100) pct = 100;
-
-              setText("statusText", nvl(j.status, ""));
               byId("progressFill").style.width = pct + "%";
               setText("pctText", pct + "%");
-              byId("logBox").innerHTML = escapeHtml(buildConsoleText(j));
+              setText("statusText", status || "Running...");
+              if (!scanIsDone) setBadgeState("Scanning...");
 
-              setBadge(!!j.done);
-
-              if (j.done && !scanIsDone) {
-                scanIsDone = true;
-
+              var isDone = status.toUpperCase().indexOf("DONE") === 0;
+              if (isDone && !scanIsDone) {
                 if (pollTimer) {
                   clearInterval(pollTimer);
                   pollTimer = null;
                 }
-
-                fill = byId("progressFill");
-                fill.style.width = "100%";
-                fill.className = "progress-fill done";
-
-                setText("pctText", "100%");
-                setText("statusText", "Scan complete!");
-                byId("doneNotice").style.display = "block";
-
-                if (byId("progressPanel")) {
-                  byId("progressPanel").style.display = "none";
-                }
-
-                fetchResult(domain);
+                fetchResultIfAvailable(domain, function () {});
               }
             },
             function () {
-              setText("statusText", "Cannot reach server...");
-            }
+              fetchResultIfAvailable(
+                domain,
+                function () {},
+                function () {
+                  setText("statusText", "Cannot reach server...");
+                },
+              );
+            },
+          );
+
+          xhrGetText(
+            API_BASE + "/log?job_id=" + encodeURIComponent(JOB_ID),
+            function (text) {
+              var lines = text.split("\n");
+              if (lines.length > 50) lines = lines.slice(lines.length - 50);
+              var logBox = byId("logBox");
+              logBox.textContent =
+                lines.join("\n") || "(waiting for output...)";
+              if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
+            },
           );
         }
 
@@ -485,16 +666,103 @@
             clearInterval(pollTimer);
             pollTimer = null;
           }
-
+          scanIsDone = false;
+          resultRendered = false;
+          setBadgeState("Scanning...");
+          byId("progressPanel").style.display = "block";
+          byId("doneNotice").style.display = "none";
+          byId("resultCard").style.display = "none";
+          byId("progressFill").className = "progress-fill";
+          byId("progressFill").style.width = "0%";
+          setText("pctText", "0%");
+          setText("statusText", "Loading scan status...");
+          byId("logBox").textContent = "(waiting for output...)";
           pollStatus(domain);
-
           pollTimer = setInterval(function () {
             pollStatus(domain);
           }, 5000);
         }
 
+        function decideInitialView(domain) {
+          // ?view=result mode: skip all polling, just show stored result
+          // Used by FileMaker web viewer formula when IsScan = 1
+          var viewMode = getParam("view");
+          if (viewMode === "result") {
+            byId("progressPanel").style.display = "none";
+            byId("doneNotice").style.display = "none";
+            setText("statusText", "Loading result...");
+            fetchResultIfAvailable(
+              domain,
+              function () { setBadgeState("Done"); },
+              function () {
+                byId("progressPanel").style.display = "block";
+                setText("statusText", "No result found for this domain yet.");
+                setBadgeState("No result");
+              }
+            );
+            return;
+          }
+
+          // No job_id: try result first, then fall back to polling
+          if (!JOB_ID) {
+            fetchResultIfAvailable(
+              domain,
+              function () { setBadgeState("Done"); },
+              function () {
+                setBadgeState("Scanning...");
+                startPolling(domain);
+              }
+            );
+            return;
+          }
+
+          // Has job_id: check if job is still actively running on the server
+          xhrGetJson(
+            API_BASE + "/status?job_id=" + encodeURIComponent(JOB_ID),
+            function (j) {
+              var runningNow =
+                j && typeof j.running !== "undefined"
+                  ? String(j.running).toLowerCase()
+                  : "";
+
+              if (runningNow === "true" || runningNow === "1") {
+                // Job is live — start live polling
+                startPolling(domain);
+              } else {
+                // Job is no longer running — try to show stored result immediately
+                // without flashing the polling UI
+                byId("progressPanel").style.display = "none";
+                fetchResultIfAvailable(
+                  domain,
+                  function () { setBadgeState("Done"); },
+                  function () {
+                    // Result not ready yet — maybe still writing, poll briefly
+                    byId("progressPanel").style.display = "block";
+                    startPolling(domain);
+                  }
+                );
+              }
+            },
+            function () {
+              // /status unreachable — try result directly
+              byId("progressPanel").style.display = "none";
+              fetchResultIfAvailable(
+                domain,
+                function () { setBadgeState("Done"); },
+                function () {
+                  byId("progressPanel").style.display = "block";
+                  startPolling(domain);
+                }
+              );
+            }
+          );
+        }
+
+        window.clearLog = clearLog;
+        window.copyLog = copyLog;
+        window.toggleAutoScroll = toggleAutoScroll;
+
         window.onload = function () {
-          // Always show server info card
           setText("serverNameTag", getServerName());
           setText("serverUrlTag", API_BASE);
 
@@ -505,8 +773,7 @@
           }
 
           setText("domainTag", AUTO_DOMAIN);
-          setBadge(false);
-          startPolling(AUTO_DOMAIN);
+          decideInitialView(AUTO_DOMAIN);
         };
       })();
     </script>

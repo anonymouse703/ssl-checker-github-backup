@@ -74,7 +74,6 @@ async function createNewPage(browser) {
     // Block media files and tracking scripts
     if (
       resourceType === 'media' ||
-      resourceType === 'font' ||
       url.includes('google-analytics.com') ||
       url.includes('googletagmanager.com') ||
       url.includes('doubleclick.net') ||

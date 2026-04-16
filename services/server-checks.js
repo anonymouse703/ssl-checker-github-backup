@@ -1,9 +1,3 @@
-/**
- * server-checks.js
- *
- * Pure Node.js implementation with proper timeouts
- */
-
 'use strict';
 
 const dns  = require('dns').promises;
@@ -66,7 +60,7 @@ async function checkSPF(domain) {
 
     const record = spfRecords[0];
     const lookupMechanisms = (record.match(/\b(include:[^\s]+|a\b|a:[^\s]+|mx\b|mx:[^\s]+|ptr\b|ptr:[^\s]+|exists:[^\s]+|redirect=[^\s]+)/gi) || []);
-    
+
     if (lookupMechanisms.length > 10) {
       return { status: 'WARN', detail: `Lookup limit risk (${lookupMechanisms.length} mechanisms)` };
     }
@@ -198,7 +192,7 @@ async function checkMX(domain) {
   }
 }
 
-// ─── Domain Blacklist (DBL) ───────────────────────────────────────────────────
+// ─── Domain Blacklist (DBL) ─────────────────────────────────────────────────
 
 async function checkDomainBlacklist(domain) {
   try {
@@ -241,6 +235,8 @@ async function checkHTTP(domain) {
       resolve({ status: 'Timeout', code: '000' });
     }, 10000);
 
+    if (typeof timeout.unref === 'function') timeout.unref();
+
     const options = {
       hostname: domain,
       path: '/',
@@ -261,7 +257,7 @@ async function checkHTTP(domain) {
       clearTimeout(timeout);
       resolve({ status: 'Missing', code: '000' });
     });
-    
+
     request.end();
   });
 }
@@ -277,6 +273,8 @@ async function checkSSL(domain) {
       }
       resolve({ status: 'Timeout', detail: 'Connection timeout' });
     }, 10000);
+
+    if (typeof timeout.unref === 'function') timeout.unref();
 
     socket = tls.connect(
       { host: domain, port: 443, servername: domain, timeout: 10000 },
@@ -325,6 +323,8 @@ async function checkBrokenLinks(domain) {
       resolve({ status: 'Skipped', detail: 'Check timed out (10s)' });
     }, 10000);
 
+    if (typeof timeout.unref === 'function') timeout.unref();
+
     try {
       const html = await fetchHTMLWithTimeout(`https://${domain}`, 5000);
       if (!html) {
@@ -365,13 +365,13 @@ async function checkBrokenLinks(domain) {
       clearTimeout(timeout);
 
       if (broken.length > 0) {
-        return resolve({ 
-          status: 'Missing', 
-          detail: `${broken.length} broken link(s): ${broken.slice(0, 3).join(', ')}` 
+        return resolve({
+          status: 'Missing',
+          detail: `${broken.length} broken link(s): ${broken.slice(0, 3).join(', ')}`
         });
       }
       return resolve({ status: 'OK', detail: `${links.size} links checked` });
-      
+
     } catch (err) {
       clearTimeout(timeout);
       return resolve({ status: 'Skipped', detail: err.message });
@@ -389,19 +389,21 @@ function fetchHTMLWithTimeout(url, timeoutMs) {
       resolve(null);
     }, timeoutMs);
 
+    if (typeof timeout.unref === 'function') timeout.unref();
+
     const lib = url.startsWith('https') ? https : http;
-    request = lib.get(url, { 
-      timeout: timeoutMs, 
-      headers: { 'User-Agent': 'ssl-checker-tool/1.0' } 
+    request = lib.get(url, {
+      timeout: timeoutMs,
+      headers: { 'User-Agent': 'ssl-checker-tool/1.0' }
     }, (res) => {
       if (res.statusCode >= 301 && res.statusCode <= 302 && res.headers.location) {
         clearTimeout(timeout);
         return fetchHTMLWithTimeout(res.headers.location, timeoutMs).then(resolve);
       }
-      
+
       let data = '';
-      res.on('data', (chunk) => { 
-        data += chunk; 
+      res.on('data', (chunk) => {
+        data += chunk;
         if (data.length > 100000) {
           res.destroy();
           clearTimeout(timeout);
@@ -413,7 +415,7 @@ function fetchHTMLWithTimeout(url, timeoutMs) {
         resolve(data);
       });
     });
-    
+
     request.on('error', () => {
       clearTimeout(timeout);
       resolve(null);
@@ -431,12 +433,14 @@ function headRequestWithTimeout(url, timeoutMs) {
       resolve(0);
     }, timeoutMs);
 
+    if (typeof timeout.unref === 'function') timeout.unref();
+
     try {
       const lib = url.startsWith('https') ? https : http;
-      request = lib.request(url, { 
-        method: 'HEAD', 
-        timeout: timeoutMs, 
-        headers: { 'User-Agent': 'ssl-checker-tool/1.0' } 
+      request = lib.request(url, {
+        method: 'HEAD',
+        timeout: timeoutMs,
+        headers: { 'User-Agent': 'ssl-checker-tool/1.0' }
       }, (res) => {
         clearTimeout(timeout);
         resolve(res.statusCode);
@@ -463,13 +467,24 @@ async function runServerChecks(domain, context) {
     const serverIP = aRecords[0] || '';
 
     const checkWithTimeout = (promise, name, timeoutMs = 10000) => {
-      return Promise.race([
-        promise,
-        new Promise(resolve => setTimeout(() => {
+      let timeoutId = null;
+
+      const timeoutPromise = new Promise((resolve) => {
+        timeoutId = setTimeout(() => {
           console.log(`[server-checks] ${name} timed out for ${domain}`);
           resolve({ status: 'Timeout', detail: 'Operation timed out' });
-        }, timeoutMs))
-      ]);
+        }, timeoutMs);
+
+        if (typeof timeoutId.unref === 'function') {
+          timeoutId.unref();
+        }
+      });
+
+      return Promise.race([promise, timeoutPromise]).finally(() => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+      });
     };
 
     const [spf, dmarc, dkim, mx, dbl, rbl, httpCheck, ssl, brokenLinks] = await Promise.all([
@@ -505,7 +520,13 @@ async function runServerChecks(domain, context) {
       broken_links_detail: brokenLinks.detail,
     };
 
-    return { status: 'SUCCESS', data, error: null, errorCode: null };
+    return {
+      status: 'SUCCESS',
+      data,
+      error: null,
+      errorCode: null,
+      duration_ms: Date.now() - start,
+    };
 
   } catch (err) {
     console.error(`[server-checks] Error for ${domain}:`, err.message);
@@ -525,6 +546,7 @@ async function runServerChecks(domain, context) {
       },
       error: err.message,
       errorCode: getErrorCode({ error: err.message }),
+      duration_ms: Date.now() - start,
     };
   }
 }

@@ -7,14 +7,14 @@
 const fs = require('fs');
 const path = require('path');
 const { syncDomainImages } = require('./sync-images');
-const { acquireBrowser } = require('./utils/browser-pool');
+const { acquireBrowser, closePool } = require('./utils/browser-pool');
 const { checkSiteReachable } = require('./utils/site-checker');
 
 process.setMaxListeners(20);
 
 // Enable garbage collection if available
 if (global.gc) {
-  setInterval(() => {
+  const gcMonitor = setInterval(() => {
     const usage = process.memoryUsage();
     if (usage.rss > 400 * 1024 * 1024) {
       console.log(
@@ -23,6 +23,10 @@ if (global.gc) {
       global.gc();
     }
   }, 30000);
+
+  if (typeof gcMonitor.unref === 'function') {
+    gcMonitor.unref();
+  }
 }
 
 const originalTimeout = setTimeout;
@@ -51,17 +55,16 @@ const { runIntoDNS } = require('./services/intodns');
 
 loadEnv();
 
-// const domain = process.argv[2];
 function sanitizeDomain(raw) {
-  let s = String(raw || "").trim().toLowerCase();
+  let s = String(raw || '').trim().toLowerCase();
 
-  s = s.replace(/^https?:\/\//i, "");
-  s = s.replace(/^www\./i, "");
-  s = s.split("/")[0];
-  s = s.split("?")[0];
-  s = s.split("#")[0];
-  s = s.replace(/:\d+$/, "");
-  s = s.replace(/\.+$/, "");
+  s = s.replace(/^https?:\/\//i, '');
+  s = s.replace(/^www\./i, '');
+  s = s.split('/')[0];
+  s = s.split('?')[0];
+  s = s.split('#')[0];
+  s = s.replace(/:\d+$/, '');
+  s = s.replace(/\.+$/, '');
 
   return s;
 }
@@ -98,6 +101,7 @@ const LOG_FILE = path.join(OUTPUT_DIR, `progress_${JOB_ID}.log`);
 
 // ── Domain lock file ──────────────────────────────────────────────────────────
 const DOMAIN_LOCK_FILE = path.join(OUTPUT_DIR, `lock_${domain}.pid`);
+const LOCK_STALE_MS = 30 * 60 * 1000; // 30 minutes
 
 function acquireDomainLock() {
   try {
@@ -106,15 +110,22 @@ function acquireDomainLock() {
   } catch (e) {
     if (e.code === 'EEXIST') {
       try {
+        const stats = fs.statSync(DOMAIN_LOCK_FILE);
+        const now = Date.now();
+        if (now - stats.mtimeMs > LOCK_STALE_MS) {
+          // stale by age – take over
+          fs.writeFileSync(DOMAIN_LOCK_FILE, String(process.pid), { flag: 'w' });
+          return true;
+        }
         const ownerPid = parseInt(fs.readFileSync(DOMAIN_LOCK_FILE, 'utf8'), 10);
         try {
           process.kill(ownerPid, 0);
-          return false;
+          return false; // still alive
         } catch (_) {
-          // dead — stale lock, take it over
+          // dead – take over
+          fs.writeFileSync(DOMAIN_LOCK_FILE, String(process.pid), { flag: 'w' });
+          return true;
         }
-        fs.writeFileSync(DOMAIN_LOCK_FILE, String(process.pid), { flag: 'w' });
-        return true;
       } catch (_) {
         return false;
       }
@@ -145,15 +156,12 @@ process.on('SIGTERM', () => {
   process.exit(143);
 });
 
-const DOMAIN_LOCK_ALREADY_HELD = process.env.DOMAIN_LOCK_ALREADY_HELD === '1';
-
-if (!DOMAIN_LOCK_ALREADY_HELD) {
-  if (!acquireDomainLock()) {
-    console.error(`❌ Another process is already scanning ${domain}. Exiting.`);
-    process.exit(1);
-  }
-  console.log(`[lock] Acquired lock for ${domain} (PID: ${process.pid})`);
+// If lock is already held by us (e.g., from parent), skip acquisition
+if (!acquireDomainLock()) {
+  console.error(`❌ Another process is already scanning ${domain}. Exiting.`);
+  process.exit(1);
 }
+console.log(`[lock] Acquired lock for ${domain} (PID: ${process.pid})`);
 
 function progressLog(message) {
   const timestamp = new Date().toLocaleTimeString();
@@ -181,11 +189,6 @@ function writeProgress(completed, total, lastDomain, finishTime, status) {
   } catch (_) {}
 }
 
-writeProgress(0, 1, domain, '', 'RUNNING — ' + domain);
-
-console.log(`   🔑 Job ID : ${JOB_ID}`);
-console.log(`   ⏱️  SSL delay : ${sslDelay}ms`);
-
 if (FRESH && fs.existsSync(paths.csvPath)) {
   try {
     fs.unlinkSync(paths.csvPath);
@@ -199,7 +202,7 @@ if (FRESH && fs.existsSync(paths.csvPath)) {
   }
 }
 
-const TOOLS = [
+const ALL_TOOLS = [
   { key: 'ssl', label: '🔒 SSL Lab' },
   { key: 'sucuri', label: '🛡️  Sucuri' },
   { key: 'pagespeed', label: '📈 PageSpeed' },
@@ -209,8 +212,38 @@ const TOOLS = [
   { key: 'server', label: '🖥️  Server' },
   { key: 'intodns', label: '🌐 IntoDNS' },
 ];
+
+function readEnabledTools() {
+  try {
+    const raw = process.env.ENABLED_TOOLS || '[]';
+    const parsed = JSON.parse(raw);
+
+    if (!Array.isArray(parsed) || !parsed.length) {
+      return ALL_TOOLS.map((t) => t.key);
+    }
+
+    const allowed = new Set(ALL_TOOLS.map((t) => t.key));
+    return parsed
+      .map((v) => String(v || '').trim().toLowerCase())
+      .filter((v) => allowed.has(v));
+  } catch (_) {
+    return ALL_TOOLS.map((t) => t.key);
+  }
+}
+
+const ENABLED_TOOL_KEYS = readEnabledTools();
+const TOOLS = ALL_TOOLS.filter((t) => ENABLED_TOOL_KEYS.includes(t.key));
 const TOTAL_TOOLS = TOOLS.length;
 const toolStatus = {};
+
+function isEnabled(key) {
+  return ENABLED_TOOL_KEYS.includes(key);
+}
+
+writeProgress(0, TOTAL_TOOLS || 1, domain, '', 'RUNNING — ' + domain);
+
+console.log(`   🔑 Job ID : ${JOB_ID}`);
+console.log(`   ⏱️  SSL delay : ${sslDelay}ms`);
 
 function renderProgress() {
   const done = Object.values(toolStatus).filter((t) => t.done).length;
@@ -238,6 +271,19 @@ function markDone(key, resultStr, startMs) {
   renderProgress();
 }
 
+function skippedResult(key) {
+  return {
+    status: 'SKIPPED',
+    error: null,
+    errorCode: null,
+    url: '',
+    screenshot: '',
+    data: {},
+    skipped: true,
+    tool: key,
+  };
+}
+
 function deleteLocalImages(imagesDir) {
   try {
     const imageExts = ['.png', '.jpg', '.jpeg', '.webp'];
@@ -261,13 +307,14 @@ function buildCSVRow(results, paths, totalTimeStr) {
   const syncEnabled = String(process.env.IMAGE_SYNC_ENABLED || 'false').toLowerCase() === 'true';
   const syncBaseUrl = (process.env.IMAGE_SYNC_BASE_URL || '').replace(/\/$/, '');
 
+  // Stable cache buster per run so browser does not reuse old remote images.
+  const imageVersion = new Date(results.timestamp || Date.now()).getTime();
+
   const screenshotPath = (filename) => {
     if (!filename) return 'none';
-    
-    // FIXED: No extra 'images/' folder - just the filename
-    // URL: https://ta1.in-depth.com/images/domain.com/ssl.png
+
     if (syncEnabled && syncBaseUrl) {
-      return `${syncBaseUrl}/${results.domain}/${filename}`;
+      return `${syncBaseUrl}/${results.domain}/${filename}?v=${imageVersion}`;
     }
     return path.join(paths.imagesDir, filename);
   };
@@ -424,16 +471,14 @@ async function main() {
     console.log(`   ${'─'.repeat(50)}`);
     console.log(`   0 / ${TOTAL_TOOLS} complete\n`);
 
-    // ── Site reachability check ─────────────────────────────────────────────
-    // Runs before any browser is acquired. Dead domains finish in < 15 seconds.
     progressLog(`Checking if ${domain} is reachable...`);
-    writeProgress(0, 1, domain, '', `CHECKING — ${domain}`);
+    writeProgress(0, TOTAL_TOOLS || 1, domain, '', `CHECKING — ${domain}`);
 
     const reachability = await checkSiteReachable(domain, 15000);
 
     if (!reachability.alive) {
       progressLog(`❌ Site unreachable: ${domain} — ${reachability.reason}`);
-      writeProgress(0, 1, domain, '', `DEAD — ${domain} is not reachable`);
+      writeProgress(0, TOTAL_TOOLS || 1, domain, '', `DEAD — ${domain} is not reachable`);
 
       const deadRow = {
         Domain: domain,
@@ -496,22 +541,28 @@ async function main() {
       const latestPathFile = path.join(OUTPUT_DIR, `latest_path_${JOB_ID}.txt`);
       fs.writeFileSync(latestPathFile, paths.domainSummaryPath);
 
-      const doneFlagFile = path.join(OUTPUT_DIR, `done_${JOB_ID}.flag`);
-      fs.writeFileSync(doneFlagFile, new Date().toISOString());
-
       const finishTime = new Date().toLocaleString();
-      writeProgress(1, 1, domain, finishTime, `DEAD — ${domain}`);
+      writeProgress(TOTAL_TOOLS || 1, TOTAL_TOOLS || 1, domain, finishTime, `DEAD — ${domain}`);
       progressLog(`Dead domain scan complete for ${domain}`);
-      return; // ← skip all browser tools
+      return;
     }
 
     progressLog(`✅ ${domain} is reachable (${reachability.reason}) — starting full scan`);
-    // ── End reachability check ──────────────────────────────────────────────
 
-    const browserResult = await acquireBrowser();
-    browser = browserResult.browser;
-    release = browserResult.release;
-    const newTab = () => createNewPage(browser);
+    const browserToolKeys = ['ssl', 'sucuri', 'pagespeed', 'pingdom', 'dns', 'pagerank', 'intodns'];
+    const needsBrowser = browserToolKeys.some((key) => isEnabled(key));
+
+    let newTab = null;
+
+    if (needsBrowser) {
+      const browserResult = await acquireBrowser();
+      browser = browserResult.browser;
+      release = browserResult.release;
+      newTab = () => createNewPage(browser);
+      progressLog('Browser acquired');
+    } else {
+      progressLog('No browser needed for selected tools');
+    }
 
     const origLog = console.log;
     const origWarn = console.warn;
@@ -582,14 +633,37 @@ async function main() {
       serverResult,
       intodnsResult,
     ] = await Promise.all([
-      track('ssl', () => runSSLLabs(domain, context), (r) => `Grade: ${r?.data?.overallGrade || 'N/A'}`),
-      track('sucuri', () => runSucuri(domain, context), (r) => r?.data?.overallStatus || 'UNKNOWN'),
-      track('pagespeed', () => runPageSpeed(domain, context), (r) => `Perf: ${r?.data?.scores?.performance ?? 'N/A'}`),
-      track('pingdom', () => runPingdom(domain, context), (r) => `Grade: ${r?.data?.performanceGrade || 'N/A'} | Load: ${r?.data?.loadTime || 'N/A'}`),
-      track('dns', () => runWhatsMyDNS(domain, context), (r) => `${r?.data?.propagated ?? '?'}/${r?.data?.totalServers ?? '?'} (${r?.data?.propagationRate || '0%'})`),
-      track('pagerank', () => runPageRank(domain, context), (r) => `PR: ${r?.data?.page_rank_integer ?? 'N/A'}`),
-      track('server', () => runServerChecks(domain, context), (r) => `IP: ${r?.data?.ip || 'N/A'}`),
-      track('intodns', () => runIntoDNS(domain, context), (r) => `Health: ${r?.data?.overallHealth || 'N/A'}`),
+      isEnabled('ssl')
+        ? track('ssl', () => runSSLLabs(domain, context), (r) => `Grade: ${r?.data?.overallGrade || 'N/A'}`)
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('ssl') }),
+
+      isEnabled('sucuri')
+        ? track('sucuri', () => runSucuri(domain, context), (r) => r?.data?.overallStatus || 'UNKNOWN')
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('sucuri') }),
+
+      isEnabled('pagespeed')
+        ? track('pagespeed', () => runPageSpeed(domain, context), (r) => `Perf: ${r?.data?.scores?.performance ?? 'N/A'}`)
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('pagespeed') }),
+
+      isEnabled('pingdom')
+        ? track('pingdom', () => runPingdom(domain, context), (r) => `Grade: ${r?.data?.performanceGrade || 'N/A'} | Load: ${r?.data?.loadTime || 'N/A'}`)
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('pingdom') }),
+
+      isEnabled('dns')
+        ? track('dns', () => runWhatsMyDNS(domain, context), (r) => `${r?.data?.propagated ?? '?'}/${r?.data?.totalServers ?? '?'} (${r?.data?.propagationRate || '0%'})`)
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('dns') }),
+
+      isEnabled('pagerank')
+        ? track('pagerank', () => runPageRank(domain, context), (r) => `PR: ${r?.data?.page_rank_integer ?? 'N/A'}`)
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('pagerank') }),
+
+      isEnabled('server')
+        ? track('server', () => runServerChecks(domain, context), (r) => `IP: ${r?.data?.ip || 'N/A'}`)
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('server') }),
+
+      isEnabled('intodns')
+        ? track('intodns', () => runIntoDNS(domain, context), (r) => `Health: ${r?.data?.overallHealth || 'N/A'}`)
+        : Promise.resolve({ status: 'fulfilled', value: skippedResult('intodns') }),
     ]);
 
     console.log = origLog;
@@ -668,7 +742,6 @@ async function main() {
     progressLog(`✅ Per-domain summary CSV updated: ${paths.domainSummaryPath}`);
     progressLog(`✅ Batch summary CSV updated: ${paths.batchSummaryPath}`);
 
-    // Update latest results file
     try {
       progressLog(`Updating latest results file for ${domain}...`);
       await updateLatestResults(csvRow);
@@ -680,23 +753,51 @@ async function main() {
     const latestPathFile = path.join(OUTPUT_DIR, `latest_path_${JOB_ID}.txt`);
     fs.writeFileSync(latestPathFile, paths.domainSummaryPath);
 
-    const doneFlagFile = path.join(OUTPUT_DIR, `done_${JOB_ID}.flag`);
-    fs.writeFileSync(doneFlagFile, new Date().toISOString());
+    // Do not mark DONE yet.
+    // First sync the remote images so ta1 has the new files before the UI fetches them.
+    const syncStartTime = new Date().toLocaleString('en-US', {
+      month: '2-digit',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+
+    writeProgress(
+      TOTAL_TOOLS || 1,
+      TOTAL_TOOLS || 1,
+      domain,
+      syncStartTime,
+      `SYNCING_IMAGES — ${domain} at ${syncStartTime}`
+    );
+    progressLog(`⏳ CSV ready, syncing screenshots for ${domain}...`);
+
+    let syncSucceeded = false;
 
     try {
-      progressLog(`Syncing screenshots to remote server for ${domain}...`);
       const syncResult = await syncDomainImages(paths.domainDir, domain);
+
       if (syncResult?.success) {
+        syncSucceeded = true;
         progressLog(
-          `Remote image sync complete → ${syncResult.remoteHost}:${syncResult.remoteDomainDir}`
+          `✅ Remote image sync complete → ${syncResult.remoteHost}:${syncResult.remoteDomainDir}`
         );
+
+        if (Array.isArray(syncResult.remoteFiles) && syncResult.remoteFiles.length) {
+          progressLog(`✅ Remote files: ${syncResult.remoteFiles.join(', ')}`);
+        }
+
         deleteLocalImages(paths.imagesDir);
-        progressLog(`Local images deleted from ${paths.imagesDir}`);
+        progressLog(`✅ Local images deleted from ${paths.imagesDir}`);
       } else if (syncResult?.skipped) {
-        progressLog(`Remote image sync skipped → ${syncResult.reason}`);
+        progressLog(`⚠️ Remote image sync skipped → ${syncResult.reason}`);
+      } else {
+        progressLog(`⚠️ Remote image sync returned no success flag`);
       }
     } catch (err) {
-      progressLog(`Remote image sync failed → ${err.message}`);
+      progressLog(`❌ Remote image sync failed → ${err.message}`);
     }
 
     const finishTime = new Date().toLocaleString('en-US', {
@@ -709,8 +810,23 @@ async function main() {
       hour12: true,
     });
 
-    writeProgress(1, 1, domain, finishTime, `DONE — ${domain} finished at ${finishTime}`);
-    progressLog(`Audit complete — ${domain} finished at ${finishTime}`);
+    writeProgress(
+      TOTAL_TOOLS || 1,
+      TOTAL_TOOLS || 1,
+      domain,
+      finishTime,
+      syncSucceeded
+        ? `DONE — ${domain} finished at ${finishTime}`
+        : `DONE_WITH_SYNC_WARNING — ${domain} finished at ${finishTime}`
+    );
+
+    progressLog(
+      syncSucceeded
+        ? `✅ Results ready — ${domain} finished at ${finishTime}`
+        : `⚠️ Results ready with sync warning — ${domain} finished at ${finishTime}`
+    );
+
+    progressLog(`Audit complete — ${domain}`);
 
     printSummary(results, paths, csvRow, totalTimeStr);
   } catch (error) {
@@ -719,7 +835,7 @@ async function main() {
     const errorTime = new Date().toLocaleString();
     writeProgress(
       0,
-      1,
+      TOTAL_TOOLS || 1,
       domain,
       errorTime,
       `FAILED — ${domain} failed at ${errorTime} - ${error.message}`
@@ -733,9 +849,26 @@ async function main() {
         progressLog(`Error releasing browser: ${e.message}`);
       }
     }
+
+    try {
+      await closePool();
+      progressLog('Browser pool closed successfully');
+    } catch (e) {
+      progressLog(`Error closing browser pool: ${e.message}`);
+    }
+
     releaseDomainLock();
     progressLog(`Domain lock released for ${domain}`);
+
+    try {
+      const doneFlagFile = path.join(OUTPUT_DIR, `done_${JOB_ID}.flag`);
+      fs.writeFileSync(doneFlagFile, new Date().toISOString());
+      progressLog(`✅ Done flag written for job ${JOB_ID}`);
+    } catch (e) {
+      progressLog(`Error writing done flag: ${e.message}`);
+    }
   }
+
 }
 
 main().catch(console.error);

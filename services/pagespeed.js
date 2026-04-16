@@ -2,8 +2,15 @@ const { getErrorCode } = require('../utils/error-codes');
 const https = require('https');
 const path = require('path');
 const fs = require('fs');
+const {
+  setFixedViewport,
+  captureViewportWidthFullHeight,
+  wait,
+} = require('../utils/screenshot');
 
 const API_ENDPOINT = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed';
+const PAGESPEED_VIEWPORT_WIDTH = 961;
+const PAGESPEED_VIEWPORT_HEIGHT = 900;
 
 function cleanValue(val) {
   if (!val || val === 'N/A') return val;
@@ -17,7 +24,7 @@ function fetchJson(urlObj) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error('Invalid JSON response')); }
+        catch (_) { reject(new Error('Invalid JSON response')); }
       });
     }).on('error', reject);
   });
@@ -33,20 +40,20 @@ function scoreColor(score) {
 
 function buildScorecardHtml(domain, scores, metrics, strategy, apiUrl) {
   const scoreItems = [
-    { label: 'Performance',    value: scores.performance },
-    { label: 'Accessibility',  value: scores.accessibility },
+    { label: 'Performance', value: scores.performance },
+    { label: 'Accessibility', value: scores.accessibility },
     { label: 'Best Practices', value: scores.bestPractices },
-    { label: 'SEO',            value: scores.seo },
+    { label: 'SEO', value: scores.seo },
   ];
 
   const metricItems = [
-    { label: 'First Contentful Paint',   value: metrics.fcp },
+    { label: 'First Contentful Paint', value: metrics.fcp },
     { label: 'Largest Contentful Paint', value: metrics.lcp },
-    { label: 'Total Blocking Time',      value: metrics.tbt },
-    { label: 'Cumulative Layout Shift',  value: metrics.cls },
-    { label: 'Speed Index',              value: metrics.si },
-    { label: 'Time to First Byte',       value: metrics.ttfb },
-    { label: 'Time to Interactive',      value: metrics.tti },
+    { label: 'Total Blocking Time', value: metrics.tbt },
+    { label: 'Cumulative Layout Shift', value: metrics.cls },
+    { label: 'Speed Index', value: metrics.si },
+    { label: 'Time to First Byte', value: metrics.ttfb },
+    { label: 'Time to Interactive', value: metrics.tti },
   ];
 
   const scoreCards = scoreItems.map(item => `
@@ -69,6 +76,7 @@ function buildScorecardHtml(domain, scores, metrics, strategy, apiUrl) {
 <meta charset="utf-8">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: ${PAGESPEED_VIEWPORT_WIDTH}px; min-height: ${PAGESPEED_VIEWPORT_HEIGHT}px; overflow: visible; }
   body { background: #111; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif; padding: 32px; color: #fff; }
 </style>
 </head>
@@ -87,11 +95,10 @@ function buildScorecardHtml(domain, scores, metrics, strategy, apiUrl) {
 </html>`;
 }
 
-// ── Call the PageSpeed API with a specific strategy ───────────────────────────
 async function fetchPageSpeedData(domain, apiKey, strategy) {
   const url = new URL(API_ENDPOINT);
   url.searchParams.set('url', `https://${domain}`);
-  url.searchParams.set('strategy', strategy);   // 'desktop' or 'mobile'
+  url.searchParams.set('strategy', strategy);
   if (apiKey) url.searchParams.set('key', apiKey);
   url.searchParams.append('category', 'PERFORMANCE');
   url.searchParams.append('category', 'ACCESSIBILITY');
@@ -100,64 +107,73 @@ async function fetchPageSpeedData(domain, apiKey, strategy) {
 
   const json = await fetchJson(url);
 
-  // Surface API-level errors immediately instead of silently returning N/A
-  if (json.error) {
-    throw new Error(`PageSpeed API error ${json.error.code}: ${json.error.message}`);
-  }
-  if (!json.lighthouseResult) {
-    throw new Error('No lighthouseResult in API response');
-  }
+  if (json.error) throw new Error(`PageSpeed API error ${json.error.code}: ${json.error.message}`);
+  if (!json.lighthouseResult) throw new Error('No lighthouseResult in API response');
 
   const lighthouse = json.lighthouseResult;
   const categories = lighthouse.categories || {};
-  const audits     = lighthouse.audits || {};
-  const crux       = json.loadingExperience?.metrics || {};
+  const audits = lighthouse.audits || {};
+  const crux = json.loadingExperience?.metrics || {};
 
   const scores = {
-    performance:   categories.performance       ? Math.round(categories.performance.score * 100)       : "N/A",
-    accessibility: categories.accessibility     ? Math.round(categories.accessibility.score * 100)     : "N/A",
-    bestPractices: categories["best-practices"] ? Math.round(categories["best-practices"].score * 100) : "N/A",
-    seo:           categories.seo               ? Math.round(categories.seo.score * 100)               : "N/A",
+    performance: categories.performance ? Math.round(categories.performance.score * 100) : 'N/A',
+    accessibility: categories.accessibility ? Math.round(categories.accessibility.score * 100) : 'N/A',
+    bestPractices: categories['best-practices'] ? Math.round(categories['best-practices'].score * 100) : 'N/A',
+    seo: categories.seo ? Math.round(categories.seo.score * 100) : 'N/A',
   };
 
   const metrics = {
-    fcp:  cleanValue(audits["first-contentful-paint"]?.displayValue)   || "N/A",
-    lcp:  cleanValue(audits["largest-contentful-paint"]?.displayValue) || "N/A",
-    tbt:  cleanValue(audits["total-blocking-time"]?.displayValue)      || "N/A",
-    cls:  cleanValue(audits["cumulative-layout-shift"]?.displayValue)  || "N/A",
-    ttfb: cleanValue(audits["time-to-first-byte"]?.displayValue)       || "N/A",
-    si:   cleanValue(audits["speed-index"]?.displayValue)              || "N/A",
-    tti:  cleanValue(audits["interactive"]?.displayValue)              || "N/A",
+    fcp: cleanValue(audits['first-contentful-paint']?.displayValue) || 'N/A',
+    lcp: cleanValue(audits['largest-contentful-paint']?.displayValue) || 'N/A',
+    tbt: cleanValue(audits['total-blocking-time']?.displayValue) || 'N/A',
+    cls: cleanValue(audits['cumulative-layout-shift']?.displayValue) || 'N/A',
+    ttfb: cleanValue(audits['time-to-first-byte']?.displayValue) || 'N/A',
+    si: cleanValue(audits['speed-index']?.displayValue) || 'N/A',
+    tti: cleanValue(audits['interactive']?.displayValue) || 'N/A',
   };
 
   const cruxMetrics = {
-    fcpCategory: crux.FIRST_CONTENTFUL_PAINT_MS?.category || "N/A",
-    inpCategory: crux.INTERACTION_TO_NEXT_PAINT?.category || "N/A",
+    fcpCategory: crux.FIRST_CONTENTFUL_PAINT_MS?.category || 'N/A',
+    inpCategory: crux.INTERACTION_TO_NEXT_PAINT?.category || 'N/A',
   };
 
-  const resolvedStrategy = lighthouse.configSettings?.emulatedFormFactor?.toUpperCase() || strategy.toUpperCase();
+  const resolvedStrategy =
+    lighthouse.configSettings?.emulatedFormFactor?.toUpperCase() || strategy.toUpperCase();
 
-  return { scores, metrics, cruxMetrics, strategy: resolvedStrategy, analysisTimestamp: json.analysisUTCTimestamp };
+  return {
+    scores,
+    metrics,
+    cruxMetrics,
+    strategy: resolvedStrategy,
+    analysisTimestamp: json.analysisUTCTimestamp
+  };
 }
 
-// ── Take screenshot of local HTML scorecard ───────────────────────────────────
-async function takeScreenshot(domain, scores, metrics, strategy, apiUrl, paths, newTab, wait) {
+async function takeScreenshot(domain, scores, metrics, strategy, apiUrl, paths, newTab) {
   const htmlPath = path.join(paths.domainDir, '_pagespeed_card.html');
-  const pngPath  = path.join(paths.imagesDir, 'pagespeed.png');
+  const pngPath = path.join(paths.imagesDir, 'pagespeed.png');
 
   try {
     fs.writeFileSync(htmlPath, buildScorecardHtml(domain, scores, metrics, strategy, apiUrl), 'utf8');
 
     const tab = await newTab();
     try {
-      // file:// on Linux needs 3 slashes: file:///absolute/path
+      await setFixedViewport(tab, PAGESPEED_VIEWPORT_WIDTH, PAGESPEED_VIEWPORT_HEIGHT);
       const fileUrl = 'file://' + htmlPath;
       await tab.goto(fileUrl, { waitUntil: 'load', timeout: 15000 });
       await wait(400);
-      await tab.screenshot({ path: pngPath, fullPage: true });
+
+      await captureViewportWidthFullHeight(tab, pngPath, {
+        width: PAGESPEED_VIEWPORT_WIDTH,
+        left: 0,
+        right: 0,
+        top: 0,
+        bottom: 0,
+      });
+
       return 'pagespeed.png';
     } finally {
-      await tab.close();
+      await tab.close().catch(() => {});
       try { fs.unlinkSync(htmlPath); } catch (_) {}
     }
   } catch (err) {
@@ -167,15 +183,11 @@ async function takeScreenshot(domain, scores, metrics, strategy, apiUrl, paths, 
 }
 
 async function runPageSpeed(domain, context) {
-  const { wait, newTab, paths } = context;
-  const PAGESPEED_API_KEY = context.env.PAGESPEED_API_KEY || "";
+  const { newTab, paths } = context;
+  const PAGESPEED_API_KEY = context.env.PAGESPEED_API_KEY || '';
 
   const apiUrl = `https://pagespeed.web.dev/report?url=https://${domain}`;
 
-  // ── Strategy: try DESKTOP first (more reliable, less throttling).
-  //   If that fails, retry with MOBILE as fallback.
-  //   Previously no strategy was set at all, which defaulted to mobile
-  //   and caused silent N/A failures on many sites.
   let apiData = null;
   let apiError = null;
   let usedStrategy = 'DESKTOP';
@@ -184,33 +196,30 @@ async function runPageSpeed(domain, context) {
     try {
       apiData = await fetchPageSpeedData(domain, PAGESPEED_API_KEY, strategy);
       usedStrategy = strategy.toUpperCase();
-      break; // success — stop trying
+      break;
     } catch (err) {
       console.error(`   📈 PageSpeed ${strategy} failed: ${err.message}`);
       apiError = err;
       apiData = null;
-      // loop continues to try next strategy
     }
   }
 
   if (!apiData) {
-    // Both strategies failed — return N/A with the actual error message visible
     return {
-      status: "SUCCESS",
+      status: 'SUCCESS',
       data: {
-        scores:      { performance: "N/A", accessibility: "N/A", bestPractices: "N/A", seo: "N/A" },
-        metrics:     { fcp: "N/A", lcp: "N/A", tbt: "N/A", cls: "N/A", ttfb: "N/A", si: "N/A", tti: "N/A" },
-        cruxMetrics: { fcpCategory: "N/A", inpCategory: "N/A" },
-        strategy:    "FAILED",
+        scores: { performance: 'N/A', accessibility: 'N/A', bestPractices: 'N/A', seo: 'N/A' },
+        metrics: { fcp: 'N/A', lcp: 'N/A', tbt: 'N/A', cls: 'N/A', ttfb: 'N/A', si: 'N/A', tti: 'N/A' },
+        cruxMetrics: { fcpCategory: 'N/A', inpCategory: 'N/A' },
+        strategy: 'FAILED',
       },
-      error: apiError?.message || "Unknown error",
+      error: apiError?.message || 'Unknown error',
       errorCode: getErrorCode({ error: apiError?.message }),
       url: apiUrl,
       screenshot: null,
     };
   }
 
-  // ── API succeeded — take local screenshot from the data ───────────────────
   const screenshot = await takeScreenshot(
     domain,
     apiData.scores,
@@ -218,12 +227,11 @@ async function runPageSpeed(domain, context) {
     usedStrategy,
     apiUrl,
     paths,
-    newTab,
-    wait
+    newTab
   );
 
   return {
-    status: "SUCCESS",
+    status: 'SUCCESS',
     data: apiData,
     error: null,
     errorCode: null,

@@ -1,23 +1,43 @@
+'use strict';
+
 const { getErrorCode } = require('../utils/error-codes');
 const path = require('path');
+const {
+  setFixedViewport,
+  captureViewportWidthFullHeight,
+  wait,
+} = require('../utils/screenshot');
+
+const DNS_VIEWPORT_WIDTH = 1545;
+const DNS_VIEWPORT_HEIGHT = 900;
+const DNS_TOP_CROP = 0;
 
 async function runWhatsMyDNS(domain, context) {
-  const { wait, newTab, paths } = context;
+  const { newTab, paths } = context;
 
   const screenshotPath = path.join(paths.imagesDir, 'dns.png');
   const debugPath = path.join(paths.domainDir, 'dns-debug-notloaded.png');
   const tab = await newTab();
 
+  async function setDnsViewport() {
+    await setFixedViewport(tab, DNS_VIEWPORT_WIDTH, DNS_VIEWPORT_HEIGHT);
+  }
+
   async function shootTab() {
     try {
-      await tab.evaluate(() => window.scrollTo(0, 0));
+      await tab.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
       await wait(500);
-      await tab.screenshot({
-        path: screenshotPath,
-        fullPage: false
+
+      await captureViewportWidthFullHeight(tab, screenshotPath, {
+        width: DNS_VIEWPORT_WIDTH,
+        left: 0,
+        right: 0,
+        top: DNS_TOP_CROP,
+        bottom: 0,
       });
+
       return 'dns.png';
-    } catch (e) {
+    } catch (_) {
       return null;
     }
   }
@@ -29,7 +49,7 @@ async function runWhatsMyDNS(domain, context) {
         return el && !el.classList.contains('hidden');
       }, { timeout: timeoutMs });
       return true;
-    } catch (e) {
+    } catch (_) {
       return false;
     }
   }
@@ -41,7 +61,7 @@ async function runWhatsMyDNS(domain, context) {
         return !el || el.classList.contains('hidden');
       }, { timeout: timeoutMs });
       return true;
-    } catch (e) {
+    } catch (_) {
       return false;
     }
   }
@@ -91,9 +111,9 @@ async function runWhatsMyDNS(domain, context) {
         const ipv6Pattern = /\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b/;
 
         const loadingIcon = document.querySelector('svg[data-icon-loading]');
-        const spinnerHidden = !loadingIcon || loadingIcon.classList.contains('hidden');
+        const isSpinnerHidden = !loadingIcon || loadingIcon.classList.contains('hidden');
 
-        if (!spinnerHidden) return false;
+        if (!isSpinnerHidden) return false;
 
         const resultSelectors = [
           '.dns-checker-result',
@@ -151,17 +171,15 @@ async function runWhatsMyDNS(domain, context) {
         }
       }
 
-      // Process rows incrementally without storing all records
       let totalServers = 0;
       let propagated = 0;
       let failed = 0;
 
       for (const row of rows) {
         totalServers++;
-        
+
         let status = 'UNKNOWN';
-        
-        // Check status from SVG or class
+
         const statusEl = row.querySelector('svg[fill], .status-ok, .status-fail, .text-success, .text-danger');
         if (statusEl) {
           const fill = statusEl.getAttribute?.('fill') || '';
@@ -173,15 +191,14 @@ async function runWhatsMyDNS(domain, context) {
             status = 'FAIL';
           }
         }
-        
-        // Fallback to IP address detection
+
         if (status === 'UNKNOWN') {
           const text = row.innerText || '';
           const hasIp = ipv4Pattern.test(text) || ipv6Pattern.test(text);
           if (hasIp) status = 'OK';
           else status = 'FAIL';
         }
-        
+
         if (status === 'OK') propagated++;
         if (status === 'FAIL') failed++;
       }
@@ -215,11 +232,14 @@ async function runWhatsMyDNS(domain, context) {
   async function runPrimary() {
     const targetUrl = `https://www.whatsmydns.net/#A/${domain}`;
 
+    await setDnsViewport();
+
     await tab.goto(targetUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 30000
     });
 
+    await tab.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
     await wait(2500);
 
     await spinnerAppeared(8000).catch(() => {});
@@ -232,13 +252,16 @@ async function runWhatsMyDNS(domain, context) {
     }
 
     if (!loaded) {
-      await tab.screenshot({
-        path: debugPath,
-        fullPage: false
+      await captureViewportWidthFullHeight(tab, debugPath, {
+        width: DNS_VIEWPORT_WIDTH,
+        left: 0,
+        right: 0,
+        top: DNS_TOP_CROP,
+        bottom: 0,
       }).catch(() => {});
     }
 
-    await wait(1500);
+    await wait(1200);
 
     const data = await extractWhatsMyDnsData();
     const currentUrl = await tab.evaluate(() => window.location.href).catch(() => targetUrl);
@@ -257,11 +280,14 @@ async function runWhatsMyDNS(domain, context) {
   async function runFallback() {
     const fallbackUrl = `https://dnschecker.org/#A/${domain}`;
 
+    await setDnsViewport();
+
     await tab.goto(fallbackUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 30000
     });
 
+    await tab.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
     await wait(8000);
 
     const altData = await tab.evaluate(() => {
@@ -275,18 +301,13 @@ async function runWhatsMyDNS(domain, context) {
         if (!text.trim()) continue;
 
         totalServers++;
-        
+
         let status = 'UNKNOWN';
         if (row.querySelector('.text-success')) status = 'OK';
         else if (row.querySelector('.text-danger')) status = 'FAIL';
-        else {
-          const hasIp = /\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(text);
-          if (hasIp) status = 'OK';
-          else status = 'FAIL';
-        }
 
         if (status === 'OK') propagated++;
-        if (status === 'FAIL') failed++;
+        else if (status === 'FAIL') failed++;
       }
 
       return {
@@ -294,50 +315,52 @@ async function runWhatsMyDNS(domain, context) {
         propagated,
         failed,
         propagationRate: totalServers > 0 ? Math.round((propagated / totalServers) * 100) + '%' : '0%',
-        note: totalServers === 0 ? 'No records detected on fallback' : ''
+        note: 'Fallback source'
       };
-    });
+    }).catch(() => ({
+      totalServers: 0,
+      propagated: 0,
+      failed: 0,
+      propagationRate: '0%',
+      note: 'Fallback parse failed'
+    }));
 
     const screenshot = await shootTab();
 
     return {
-      status: 'SUCCESS',
+      status: altData.totalServers > 0 ? 'SUCCESS' : 'ERROR',
       data: altData,
-      error: null,
-      errorCode: null,
+      error: altData.totalServers > 0 ? null : 'Unable to load DNS results',
+      errorCode: altData.totalServers > 0 ? null : getErrorCode('DNS_LOAD_FAILED'),
       url: fallbackUrl,
       screenshot
     };
   }
 
   try {
-    return await runPrimary();
-  } catch (err) {
+    const primary = await runPrimary();
+
+    if (primary && primary.data) {
+      return primary;
+    }
+
+    return await runFallback();
+  } catch (error) {
     try {
       return await runFallback();
-    } catch (altErr) {
+    } catch (fallbackError) {
       return {
-        status: 'SUCCESS',
-        data: {
-          totalServers: 0,
-          propagated: '?',
-          failed: '?',
-          propagationRate: 'N/A',
-          note: 'DNS check unavailable'
-        },
-        error: err.message || altErr.message,
-        errorCode: getErrorCode({ error: err.message || altErr.message }),
-        url: `https://www.whatsmydns.net/#A/${domain}`,
+        status: 'ERROR',
+        data: null,
+        error: fallbackError.message || error.message || 'DNS capture failed',
+        errorCode: getErrorCode('DNS_CAPTURE_FAILED'),
+        url: null,
         screenshot: null
       };
     }
   } finally {
-    try {
-      await tab.close().catch(() => {});
-    } catch (_) {}
+    await tab.close().catch(() => {});
   }
 }
 
-module.exports = {
-  runWhatsMyDNS
-};
+module.exports = { runWhatsMyDNS };

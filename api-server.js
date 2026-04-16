@@ -40,6 +40,25 @@ const MAX_ACTIVE_RESERVED_DOMAINS = parseInt(
 
 const activeJobs = new Map();
 
+const ALL_TOOL_KEYS = [
+  'ssl',
+  'sucuri',
+  'pagespeed',
+  'pingdom',
+  'dns',
+  'pagerank',
+  'server',
+  'intodns',
+];
+
+function normalizeSelectedTools(rawTools) {
+  if (!Array.isArray(rawTools)) return [];
+  const allowed = new Set(ALL_TOOL_KEYS);
+  return rawTools
+    .map((v) => String(v || '').trim().toLowerCase())
+    .filter((v) => allowed.has(v));
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function ensureDir(dirPath) {
@@ -119,8 +138,8 @@ function sanitizeDomain(raw) {
   s = s.split("?")[0];
   s = s.split("#")[0];
 
-  s = s.replace(/:\d+$/, "");   // remove :8080 if present
-  s = s.replace(/\.+$/, "");    // remove trailing dots
+  s = s.replace(/:\d+$/, "");
+  s = s.replace(/\.+$/, "");
 
   return s;
 }
@@ -174,32 +193,7 @@ function batchMetaPath(batchId) {
   return path.join(API_BATCH_DIR, `${batchId}.json`);
 }
 
-// ── Domain lock helpers ───────────────────────────────────────────────────────
-
-function tryAcquireDomainLock(domain, pid) {
-  const lockFile = domainLockPath(domain);
-  try {
-    fs.writeFileSync(lockFile, String(pid), { flag: "wx" });
-    console.log(`[lock] Acquired lock for ${domain} (PID: ${pid})`);
-    return true;
-  } catch (e) {
-    if (e.code !== "EEXIST") throw e;
-    try {
-      const ownerPid = parseInt(readFileOrNull(lockFile) || "0", 10);
-      try {
-        process.kill(ownerPid, 0);
-        console.log(`[lock] Lock for ${domain} held by alive PID ${ownerPid}`);
-        return false;
-      } catch (_) {
-        console.log(`[lock] Stale lock for ${domain} (PID ${ownerPid} dead), taking over`);
-        fs.writeFileSync(lockFile, String(pid), { flag: "w" });
-        return true;
-      }
-    } catch (_) {
-      return false;
-    }
-  }
-}
+// ── Domain lock helpers (check-only) ─────────────────────────────────────────
 
 function releaseDomainLock(domain, pid) {
   const lockFile = domainLockPath(domain);
@@ -210,6 +204,78 @@ function releaseDomainLock(domain, pid) {
       console.log(`[lock] Released lock for ${domain} (PID: ${pid})`);
     }
   } catch (_) {}
+}
+
+function releaseBatchDomainLocks(domains, pid) {
+  for (const domain of domains || []) releaseDomainLock(domain, pid);
+}
+
+function tryAcquireDomainLock(domain, pid, forceRescan = false) {
+  const lockFile = domainLockPath(domain);
+
+  try {
+    if (forceRescan && fs.existsSync(lockFile)) {
+      fs.unlinkSync(lockFile);
+    }
+  } catch (_) {}
+
+  try {
+    fs.writeFileSync(lockFile, String(pid), { flag: "wx" });
+    console.log(`[lock] Acquired lock for ${domain} (PID: ${pid})`);
+    return { ok: true, reason: "new_lock" };
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+
+    try {
+      const ownerPid = parseInt(readFileOrNull(lockFile) || "0", 10);
+
+      if (!Number.isFinite(ownerPid) || ownerPid <= 0) {
+        try { fs.unlinkSync(lockFile); } catch (_) {}
+        fs.writeFileSync(lockFile, String(pid), { flag: "wx" });
+        return { ok: true, reason: "recovered_invalid_lock" };
+      }
+
+      try {
+        process.kill(ownerPid, 0);
+        return { ok: false, reason: "active_lock", existingPid: ownerPid };
+      } catch (_) {
+        try { fs.unlinkSync(lockFile); } catch (_) {}
+        fs.writeFileSync(lockFile, String(pid), { flag: "wx" });
+        return { ok: true, reason: "recovered_stale_lock", previousPid: ownerPid };
+      }
+    } catch (_) {
+      return { ok: false, reason: "lock_read_failed" };
+    }
+  }
+}
+
+function acquireBatchDomainLocks(domains, pid) {
+  const acquired = [];
+  const conflicts = [];
+
+  for (const item of domains) {
+    const domain = typeof item === "string" ? item : item.domain;
+    const forceRescan = !!(item && typeof item === "object" && item.forceRescan);
+
+    try {
+      const result = tryAcquireDomainLock(domain, pid, forceRescan);
+      if (result.ok) {
+        acquired.push(domain);
+      } else {
+        conflicts.push(domain);
+      }
+    } catch (_) {
+      conflicts.push(domain);
+    }
+  }
+
+  if (conflicts.length) {
+    for (const domain of acquired) {
+      releaseDomainLock(domain, pid);
+    }
+  }
+
+  return { acquired, conflicts };
 }
 
 function currentReservedDomainCount() {
@@ -223,25 +289,31 @@ function currentReservedDomainCount() {
   return count;
 }
 
-function acquireBatchDomainLocks(domains, pid) {
-  const acquired = [];
-  const conflicts = [];
-  for (const domain of domains) {
-    try {
-      if (tryAcquireDomainLock(domain, pid)) acquired.push(domain);
-      else conflicts.push(domain);
-    } catch (_) {
-      conflicts.push(domain);
+function findActiveJobForDomain(domain) {
+  for (const job of activeJobs.values()) {
+    if (job.type === "single" && job.domain === domain) {
+      return {
+        busy: true,
+        type: "single",
+        jobId: job.jobId,
+        pid: job.pid,
+        startedAt: job.startedAt,
+      };
+    }
+
+    if (job.type === "multi" && Array.isArray(job.domains) && job.domains.includes(domain)) {
+      return {
+        busy: true,
+        type: "multi",
+        batchId: job.batchId,
+        jobId: job.jobId,
+        pid: job.pid,
+        startedAt: job.startedAt,
+      };
     }
   }
-  if (conflicts.length) {
-    for (const domain of acquired) releaseDomainLock(domain, pid);
-  }
-  return { acquired, conflicts };
-}
 
-function releaseBatchDomainLocks(domains, pid) {
-  for (const domain of domains || []) releaseDomainLock(domain, pid);
+  return { busy: false };
 }
 
 // ── Progress helpers ──────────────────────────────────────────────────────────
@@ -359,357 +431,154 @@ function findLatestDomainCSV(domain) {
         }
       }
     }
-  } catch (err) {
-    console.error(`[api] Error scanning direct result files: ${err.message}`);
-  }
+  } catch (_) {}
 
-  if (bestPath) {
-    console.log(`[api] Best direct result file: ${bestPath}`);
+  if (!bestPath) {
+    console.log(`[api] No direct result file found for ${domain}`);
   } else {
-    console.log(`[api] No direct result file found for domain: ${domain}`);
+    console.log(`[api] Best result file for ${domain}: ${bestPath}`);
   }
 
   return bestPath;
 }
 
-function findLatestDomainInBatchSummary(domain) {
-  let bestMtime = 0;
-  let bestPath = null;
-  let bestRow = null;
+function findSingleResult(domain) {
+  const csvPath = findLatestDomainCSV(domain);
+  if (!csvPath || !fs.existsSync(csvPath)) return null;
 
-  console.log(`[api] Looking for domain in batch summary.csv: ${domain}`);
+  const rows = parseCSV(fs.readFileSync(csvPath, "utf8"));
+  if (!rows.length) return null;
 
-  try {
-    const entries = fs.readdirSync(SCAN_ROOT);
-    for (const entry of entries) {
-      if (!/^\d{4}-\d{2}-\d{2}/.test(entry)) continue;
+  return {
+    csv_path: csvPath,
+    data: rows[rows.length - 1],
+  };
+}
 
-      const batchPath = path.join(SCAN_ROOT, entry);
-      const summaryPath = path.join(batchPath, "summary.csv");
-      if (!fs.existsSync(summaryPath)) continue;
+function findBatchCSV(batchRoot) {
+  if (!batchRoot || !fs.existsSync(batchRoot)) return null;
 
-      const raw = readFileOrNull(summaryPath);
-      if (!raw) continue;
+  const candidates = [
+    path.join(batchRoot, "summary.csv"),
+    path.join(batchRoot, "all_domains_summary.csv"),
+  ];
 
-      const rows = parseCSV(raw);
-      const row = rows.find((r) => sanitizeDomain(r.Domain || "") === domain);
-      if (!row) continue;
-
-      const mtime = fs.statSync(summaryPath).mtimeMs;
-      if (mtime > bestMtime) {
-        bestMtime = mtime;
-        bestPath = summaryPath;
-        bestRow = row;
-      }
-    }
-  } catch (err) {
-    console.error(`[api] Error scanning batch summary CSVs: ${err.message}`);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
   }
 
-  if (bestPath) {
-    console.log(`[api] Best batch summary hit: ${bestPath}`);
-    return { path: bestPath, row: bestRow };
-  }
-
-  console.log(`[api] No batch summary hit found for domain: ${domain}`);
   return null;
 }
 
-function findDomainFromLatestPathFiles(domain) {
-  let bestMtime = 0;
-  let bestPath = null;
-  let bestRow = null;
+// ── Cleanup helpers ───────────────────────────────────────────────────────────
 
-  console.log(`[api] Looking for domain via latest_path_*.txt: ${domain}`);
+function cleanupOldApiHelperFiles(hours = 24) {
+  const now = Date.now();
+  const cutoffMs = hours * 60 * 60 * 1000;
+  const cutoffTime = now - cutoffMs;
 
-  try {
-    const files = fs.readdirSync(OUTPUT_DIR).filter((f) => /^latest_path_.+\.txt$/.test(f));
-
-    for (const file of files) {
-      const fullPath = path.join(OUTPUT_DIR, file);
-
-      let stat;
-      try {
-        stat = fs.statSync(fullPath);
-      } catch (_) {
-        continue;
-      }
-
-      const pointedPath = (readFileOrNull(fullPath) || "").trim();
-      if (!pointedPath) continue;
-      if (!fs.existsSync(pointedPath)) continue;
-
-      const raw = readFileOrNull(pointedPath);
-      if (!raw) continue;
-
-      const rows = parseCSV(raw);
-      const row = rows.find((r) => sanitizeDomain(r.Domain || "") === domain);
-      if (!row) continue;
-
-      if (stat.mtimeMs > bestMtime) {
-        bestMtime = stat.mtimeMs;
-        bestPath = pointedPath;
-        bestRow = row;
-      }
-    }
-  } catch (err) {
-    console.error(`[api] Error scanning latest_path files: ${err.message}`);
-  }
-
-  if (bestPath) {
-    console.log(`[api] Found via latest_path file: ${bestPath}`);
-    return { path: bestPath, row: bestRow, source: "latest_path_file" };
-  }
-
-  console.log(`[api] No latest_path file hit found for domain: ${domain}`);
-  return null;
-}
-
-function walkDirRecursive(rootDir, visitFile) {
-  let entries = [];
-  try {
-    entries = fs.readdirSync(rootDir, { withFileTypes: true });
-  } catch (_) {
-    return;
-  }
-
-  for (const entry of entries) {
-    const fullPath = path.join(rootDir, entry.name);
-    if (entry.isDirectory()) {
-      walkDirRecursive(fullPath, visitFile);
-    } else if (entry.isFile()) {
-      visitFile(fullPath);
-    }
-  }
-}
-
-function findDomainByRecursiveSearch(domain) {
-  let bestMtime = 0;
-  let bestPath = null;
-  let bestRow = null;
-
-  console.log(`[api] Looking for domain via recursive search: ${domain}`);
-
-  try {
-    walkDirRecursive(SCAN_ROOT, (fullPath) => {
-      const base = path.basename(fullPath);
-      const isCandidate =
-        base === "summary.csv" ||
-        base === `${domain}_results.csv`;
-
-      if (!isCandidate) return;
-
-      const raw = readFileOrNull(fullPath);
-      if (!raw) return;
-
-      const rows = parseCSV(raw);
-      const row = rows.find((r) => sanitizeDomain(r.Domain || "") === domain);
-      if (!row) return;
-
-      let mtime = 0;
-      try {
-        mtime = fs.statSync(fullPath).mtimeMs;
-      } catch (_) {
-        return;
-      }
-
-      if (mtime > bestMtime) {
-        bestMtime = mtime;
-        bestPath = fullPath;
-        bestRow = row;
-      }
-    });
-  } catch (err) {
-    console.error(`[api] Error in recursive search: ${err.message}`);
-  }
-
-  if (bestPath) {
-    console.log(`[api] Found via recursive search: ${bestPath}`);
-    return { path: bestPath, row: bestRow, source: "recursive_search" };
-  }
-
-  console.log(`[api] No recursive search hit found for domain: ${domain}`);
-  return null;
-}
-
-function findNewestBatchPathAfter(startedAtIso) {
-  const startedAtMs = new Date(startedAtIso).getTime();
-  let best = null;
-  let bestMtime = 0;
-
-  try {
-    const entries = fs.readdirSync(SCAN_ROOT);
-    for (const entry of entries) {
-      if (!/^\d{4}-\d{2}-\d{2}/.test(entry)) continue;
-      const batchPath = path.join(SCAN_ROOT, entry);
-      const statsPath = path.join(batchPath, "_batch_stats.json");
-      const summaryPath = path.join(batchPath, "summary.csv");
-      if (!fs.existsSync(statsPath) && !fs.existsSync(summaryPath)) continue;
-
-      let mtime = 0;
-      if (fs.existsSync(statsPath)) {
-        mtime = Math.max(mtime, fs.statSync(statsPath).mtimeMs);
-      }
-      if (fs.existsSync(summaryPath)) {
-        mtime = Math.max(mtime, fs.statSync(summaryPath).mtimeMs);
-      }
-
-      if (mtime >= startedAtMs && mtime > bestMtime) {
-        bestMtime = mtime;
-        best = batchPath;
-      }
-    }
-  } catch (_) {}
-
-  return best;
-}
-
-function tailFile(filePath, maxLines) {
-  return (readFileOrNull(filePath) || "")
-    .split("\n")
-    .filter((l) => l.trim())
-    .slice(-maxLines)
-    .join("\n");
-}
-
-// ── Cleanup helper files older than X hours ──────────────────────────────────
-
-function cleanupOldApiHelperFiles(maxAgeHours = 24) {
-  const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
   const deleted = [];
   const skipped = [];
   const errors = [];
 
-  const activeJobIds = new Set(
-    [...activeJobs.values()].map((j) => j.jobId).filter(Boolean)
-  );
-
-  function extractJobId(file) {
-    let m = file.match(/^done_(.+)\.flag$/);
-    if (m) return m[1];
-    m = file.match(/^latest_path_(.+)\.txt$/);
-    if (m) return m[1];
-    m = file.match(/^progress_(.+)\.txt$/);
-    if (m) return m[1];
-    m = file.match(/^progress_(.+)\.log$/);
-    if (m) return m[1];
-    return null;
-  }
-
   try {
-    const files = fs.readdirSync(OUTPUT_DIR);
+    if (!fs.existsSync(OUTPUT_DIR)) {
+      return {
+        ok: true,
+        deleted,
+        skipped,
+        errors,
+        message: "OUTPUT_DIR does not exist, nothing to clean.",
+      };
+    }
 
-    for (const file of files) {
-      const jobId = extractJobId(file);
-      if (!jobId) continue;
+    const entries = fs.readdirSync(OUTPUT_DIR);
 
-      if (activeJobIds.has(jobId)) {
-        skipped.push(file);
+    for (const entry of entries) {
+      const fullPath = path.join(OUTPUT_DIR, entry);
+
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch (e) {
+        errors.push({ file: entry, error: e.message });
         continue;
       }
 
-      const fullPath = path.join(OUTPUT_DIR, file);
+      if (!stat.isFile()) {
+        skipped.push({ file: entry, reason: "not a file" });
+        continue;
+      }
+
+      const isApiHelperFile =
+        /^progress_.+\.txt$/.test(entry) ||
+        /^progress_.+\.log$/.test(entry) ||
+        /^done_.+\.flag$/.test(entry) ||
+        /^latest_path_.+\.txt$/.test(entry);
+
+      if (!isApiHelperFile) {
+        skipped.push({ file: entry, reason: "not an API helper file" });
+        continue;
+      }
+
+      if (stat.mtimeMs > cutoffTime) {
+        skipped.push({ file: entry, reason: "newer than cutoff" });
+        continue;
+      }
 
       try {
-        const stat = fs.statSync(fullPath);
-        if (!stat.isFile()) continue;
-
-        if (stat.mtimeMs < cutoff) {
-          fs.unlinkSync(fullPath);
-          deleted.push(file);
-        } else {
-          skipped.push(file);
-        }
+        fs.unlinkSync(fullPath);
+        deleted.push(entry);
       } catch (e) {
-        errors.push({ file, error: e.message });
+        errors.push({ file: entry, error: e.message });
       }
     }
-  } catch (e) {
+
     return {
-      ok: false,
-      error: e.message,
+      ok: true,
       deleted,
       skipped,
       errors,
+      cutoff_iso: new Date(cutoffTime).toISOString(),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      deleted,
+      skipped,
+      errors,
+      error: e.message,
     };
   }
-
-  return {
-    ok: true,
-    deleted,
-    skipped,
-    errors,
-    cutoff_iso: new Date(cutoff).toISOString(),
-  };
 }
 
-// ── Body parser ───────────────────────────────────────────────────────────────
-
-function parseBodyJson(req, callback) {
-  let body = "";
-  req.on("data", (chunk) => {
-    body += chunk;
-  });
-  req.on("end", () => {
-    let parsed;
-    try {
-      parsed = JSON.parse(body || "{}");
-    } catch (_) {
-      return callback(new Error("Invalid JSON body"));
-    }
-    callback(null, parsed);
-  });
-}
-
-const PUPPETEER_PATH =
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  "/usr/local/ind_leads/ssl-checker-tool/chrome/linux-145.0.7632.67/chrome-linux64/chrome";
-
-// ── Cleanup hooks ─────────────────────────────────────────────────────────────
-
-function cleanupServerOwnedLocks() {
-  console.log("[api] Cleaning up domain locks owned by this server...");
-  for (const job of activeJobs.values()) {
-    if (job.type === "single" && job.domain) {
-      releaseDomainLock(job.domain, process.pid);
-    } else if (job.type === "multi") {
-      releaseBatchDomainLocks(job.domains, process.pid);
-    }
+function killProcess(pid) {
+  try {
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch (_) {
+    return false;
   }
 }
-
-process.on("exit", cleanupServerOwnedLocks);
-process.on("SIGINT", () => {
-  cleanupServerOwnedLocks();
-  process.exit(130);
-});
-process.on("SIGTERM", () => {
-  cleanupServerOwnedLocks();
-  process.exit(143);
-});
-
-const STALE_JOB_MAX_AGE_MS =
-  parseInt(process.env.STALE_JOB_MAX_AGE_HOURS || "2", 10) *
-  60 * 60 * 1000;
 
 function purgeStaleJobs(maxAgeMs) {
   const now = Date.now();
   const killed = [];
 
   for (const [key, job] of activeJobs.entries()) {
-    const age = now - new Date(job.startedAt).getTime();
-    if (age < maxAgeMs) continue;
+    const started = new Date(job.startedAt).getTime();
+    if (!started || now - started < maxAgeMs) continue;
 
-    console.log(
-      `[stale] Job ${key} started ${job.startedAt} (${Math.round(age / 60000)} min ago) — killing PID ${job.pid}`
-    );
-
-    try {
-      process.kill(job.pid, "SIGKILL");
-      console.log(`[stale] Killed PID ${job.pid} for job ${key}`);
-    } catch (e) {
-      console.log(`[stale] PID ${job.pid} already gone (${e.code})`);
-    }
+    const ok = killProcess(job.pid);
+    killed.push({
+      key,
+      pid: job.pid,
+      type: job.type,
+      domain: job.domain || null,
+      batchId: job.batchId || null,
+      startedAt: job.startedAt,
+      killed: ok,
+    });
 
     if (job.type === "single" && job.domain) {
       releaseDomainLock(job.domain, job.pid);
@@ -718,44 +587,39 @@ function purgeStaleJobs(maxAgeMs) {
     }
 
     activeJobs.delete(key);
-
-    killed.push({
-      key,
-      domain: job.domain || null,
-      batchId: job.batchId || null,
-      jobId: job.jobId,
-      pid: job.pid,
-      startedAt: job.startedAt,
-      ageMinutes: Math.round(age / 60000),
-    });
-  }
-
-  if (killed.length > 0) {
-    console.log(`[stale] Purged ${killed.length} stale job(s)`);
   }
 
   return { killed };
 }
 
-const STALE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
-setInterval(() => {
-  console.log("[stale] Running scheduled stale job cleanup...");
-  purgeStaleJobs(STALE_JOB_MAX_AGE_MS);
-}, STALE_CLEANUP_INTERVAL_MS).unref();
+// ── Request body parser ───────────────────────────────────────────────────────
 
-const API_HELPER_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
-setInterval(() => {
-  const result = cleanupOldApiHelperFiles(24);
-  if (result.ok && result.deleted.length > 0) {
-    console.log(`[cleanup] deleted ${result.deleted.length} old API helper files older than 24h`);
-  }
-}, API_HELPER_CLEANUP_INTERVAL_MS).unref();
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 2 * 1024 * 1024) {
+        reject(new Error("Request body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (e) {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
 
-// ── Router ────────────────────────────────────────────────────────────────────
+// ── Main handler ──────────────────────────────────────────────────────────────
 
-function handleRequest(req, res) {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  const method = req.method.toUpperCase();
+async function handleRequest(req, res) {
+  const method = req.method || "GET";
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
   if (method === "OPTIONS") {
     res.writeHead(204, {
@@ -766,648 +630,627 @@ function handleRequest(req, res) {
     return res.end();
   }
 
-  // Health check
+  // Health
   if (method === "GET" && url.pathname === "/health") {
-    const jobs = [...activeJobs.values()].map((j) => ({
-      key: j.key,
-      type: j.type,
-      domain: j.domain || null,
-      batchId: j.batchId || null,
-      pid: j.pid,
-      startedAt: j.startedAt,
-      jobId: j.jobId || null,
-    }));
+    return jsonResponse(res, 200, {
+      ok: true,
+      status: "healthy",
+      active_jobs: activeJobs.size,
+      reserved_domains: currentReservedDomainCount(),
+      max_reserved_domains: MAX_ACTIVE_RESERVED_DOMAINS,
+      pool_stats: poolStats(),
+      now: nowIso(),
+    });
+  }
+
+  // Single scan
+
+  if (method === "POST" && url.pathname === "/scan") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const domain = sanitizeDomain(parsed.domain);
+    const forceRescan = !!parsed.force_rescan;
+    const selectedTools = normalizeSelectedTools(parsed.tools);
+    const enabledTools = selectedTools.length ? selectedTools : ALL_TOOL_KEYS;
+
+    if (!domain) {
+      return jsonResponse(res, 400, { ok: false, error: "Missing domain" });
+    }
+
+    const jobKey = `single:${domain}`;
+
+    let busy = findActiveJobForDomain(domain);
+
+    if (busy.busy && busy.jobId) {
+      const donePath = doneFlagPath(busy.jobId);
+      if (fs.existsSync(donePath)) {
+        const singleKey = `single:${domain}`;
+        if (activeJobs.has(singleKey)) {
+          console.log(`[api] Clearing stale active job for ${domain} because done flag exists (${busy.jobId})`);
+          activeJobs.delete(singleKey);
+        }
+        busy = findActiveJobForDomain(domain);
+      }
+    }
+
+    if (busy.busy) {
+      return jsonResponse(res, 409, {
+        ok: false,
+        error:
+          busy.type === "multi"
+            ? `Domain ${domain} is already included in an active batch scan`
+            : `A scan is already running for ${domain}`,
+        domain,
+        active_job_type: busy.type,
+        job_id: busy.jobId || null,
+        batch_id: busy.batchId || null,
+        pid: busy.pid || null,
+        started_at: busy.startedAt || null,
+      });
+    }
+
+    if (currentReservedDomainCount() >= MAX_ACTIVE_RESERVED_DOMAINS) {
+      return jsonResponse(res, 429, {
+        ok: false,
+        error: "Max active reserved domains reached. Try again later.",
+        reserved_domains: currentReservedDomainCount(),
+        max_reserved_domains: MAX_ACTIVE_RESERVED_DOMAINS,
+      });
+    }
+
+    const jobId = createJobId(domain);
+    const startedAt = nowIso();
+
+    initJobProgressFile(jobId, domain, 1);
+
+    if (forceRescan && activeJobs.has(jobKey)) {
+      const staleJob = activeJobs.get(jobKey);
+      activeJobs.delete(jobKey);
+      console.log(
+        `[api] force_rescan cleared in-memory reservation for ${domain} (old job_id=${staleJob.jobId})`
+      );
+    }
+
+    console.log(
+      `[api] Starting single scan for ${domain} with job_id=${jobId}${forceRescan ? " (force_rescan)" : ""}`
+    );
+
+    // Always clear any stale lock file before spawning the child.
+    // At this point activeJobs confirmed no scan is running for this domain,
+    // so any leftover lock file is from a previous crashed/finished child and
+    // must be removed — otherwise the new child's acquireDomainLock() will fail.
+    try {
+      const lockFile = domainLockPath(domain);
+      if (fs.existsSync(lockFile)) {
+        fs.unlinkSync(lockFile);
+        console.log(`[api] Cleared stale lock file for ${domain} before spawn`);
+      }
+    } catch (_) {}
+
+    const child = spawn("node", ["index.js", domain], {
+      cwd: TOOL_DIR,
+      env: {
+        ...process.env,
+        PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH,
+        JOB_ID: jobId,
+        BROWSER_POOL_SKIP: "1",
+        ENABLED_TOOLS: JSON.stringify(enabledTools),
+        FORCE_RESCAN: forceRescan ? "1" : "0",
+      },
+      detached: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const logFile = logFilePath(jobId);
+    child.stdout.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+    child.stderr.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+
+    activeJobs.set(jobKey, {
+      key: jobKey,
+      type: "single",
+      domain,
+      tools: enabledTools,
+      jobId,
+      pid: child.pid,
+      startedAt,
+      logFile,
+      forceRescan,
+    });
+
+    child.on("exit", (code, signal) => {
+      console.log(`[api] Single scan exited for ${domain}. code=${code} signal=${signal}`);
+
+      writeTextSafe(
+        doneFlagPath(jobId),
+        `done\ncode=${code}\nsignal=${signal}\nfinishedAt=${nowIso()}\ndomain=${domain}`
+      );
+
+      // Release the domain lock so the same domain can be re-scanned immediately.
+      releaseDomainLock(domain, child.pid);
+
+      activeJobs.delete(jobKey);
+    });
 
     return jsonResponse(res, 200, {
       ok: true,
-      server: "ssl-checker-tool api",
-      uptime: process.uptime(),
-      active_jobs: jobs,
-      total_active: jobs.length,
-      reserved_domains: currentReservedDomainCount(),
-      max_reserved_domains: MAX_ACTIVE_RESERVED_DOMAINS,
-      timestamp: nowIso(),
+      queued: true,
+      mode: "single",
+      domain,
+      tools: enabledTools,
+      force_rescan: forceRescan,
+      job_id: jobId,
+      pid: child.pid,
+      started_at: startedAt,
       pool_stats: poolStats(),
     });
   }
 
-  // Single domain scan
-  if (method === "POST" && url.pathname === "/scan") {
-    return parseBodyJson(req, (err, parsed) => {
-      if (err) return jsonResponse(res, 400, { ok: false, error: err.message });
+  // Batch scan
+  if (method === "POST" && url.pathname === "/multi-scan") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
 
-      const domain = sanitizeDomain(parsed.domain);
-      if (!domain) {
-        return jsonResponse(res, 400, {
-          ok: false,
-          error: "domain is required",
-        });
-      }
+    const domains = uniqueDomains(parsed.domains || []);
+    const forceRescan = !!parsed.force_rescan;
+    const selectedTools = normalizeSelectedTools(parsed.tools);
+    const enabledTools = selectedTools.length ? selectedTools : ALL_TOOL_KEYS;
 
-      const jobKey = `single:${domain}`;
+    if (!domains.length) {
+      return jsonResponse(res, 400, { ok: false, error: "No domains provided" });
+    }
 
-      if (activeJobs.has(jobKey)) {
-        const existing = activeJobs.get(jobKey);
-        const alreadyDone = fs.existsSync(existing.doneFlag);
+    const batchId = createBatchId();
+    const startedAt = nowIso();
+    const batchKey = `multi:${batchId}`;
 
-        if (alreadyDone) {
-          console.log(`[api] Job for ${domain} is done, clearing from activeJobs to allow re-scan`);
-          releaseDomainLock(domain, existing.pid);
-          activeJobs.delete(jobKey);
-        } else {
-          try {
-            process.kill(existing.pid, 0);
-            return jsonResponse(res, 200, {
-              ok: false,
-              error: `Scan already running for ${domain}. Poll /status?domain=${domain} for progress.`,
-              job_id: existing.jobId,
-              started_at: existing.startedAt,
-              pid: existing.pid,
-            });
-          } catch (_) {
-            console.log(`[api] Cleaning up crashed job for ${domain} (PID ${existing.pid})`);
-            releaseDomainLock(domain, existing.pid);
-            activeJobs.delete(jobKey);
-          }
-        }
-      }
-
-      const lockAcquired = tryAcquireDomainLock(domain, process.pid);
-      if (!lockAcquired) {
-        return jsonResponse(res, 200, {
-          ok: false,
-          error: `${domain} is locked by another process (possibly from another API server instance).`,
-        });
-      }
-
-      const jobId = createJobId(domain);
-      const startedAt = nowIso();
-
-      initJobProgressFile(jobId, domain, 1);
-
-      const child = spawn("node", ["index.js", domain], {
-        cwd: TOOL_DIR,
-        detached: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PUPPETEER_EXECUTABLE_PATH: PUPPETEER_PATH,
-          JOB_ID: jobId,
-          DOMAIN_LOCK_ALREADY_HELD: "1",
-          BROWSER_POOL_SKIP: "1",
-        },
-      });
-
-      try {
-        fs.writeFileSync(domainLockPath(domain), String(child.pid), { flag: "w" });
-      } catch (_) {}
-
-      const jobEntry = {
-        key: jobKey,
-        type: "single",
-        domain,
-        jobId,
-        pid: child.pid,
-        startedAt,
-        progressFile: progressFilePath(jobId),
-        logFile: logFilePath(jobId),
-        doneFlag: doneFlagPath(jobId),
-      };
-      activeJobs.set(jobKey, jobEntry);
-
-      console.log(`[api] single scan started: ${domain} (pid ${child.pid}) jobId=${jobId}`);
-
-      const logStream = fs.createWriteStream(logFilePath(jobId), { flags: "a" });
-      child.stdout.pipe(logStream);
-      child.stderr.on("data", (data) => logStream.write("[stderr] " + String(data)));
-
-      child.on("close", (code) => {
-        logStream.end();
-        console.log(`[api] single scan finished: ${domain} exit=${code} jobId=${jobId}`);
-        writeTextSafe(doneFlagPath(jobId), `exit=${code}\nfinishedAt=${nowIso()}`);
-        releaseDomainLock(domain, child.pid);
-        activeJobs.delete(jobKey);
-      });
-
-      child.on("error", (err) => {
-        logStream.end();
-        console.error(`[api] single scan error for ${domain}: ${err.message}`);
-        writeTextSafe(doneFlagPath(jobId), `exit=error\nerror=${err.message}\nfinishedAt=${nowIso()}`);
-        releaseDomainLock(domain, child.pid);
-        activeJobs.delete(jobKey);
-      });
-
-      return jsonResponse(res, 200, {
-        ok: true,
-        queued: true,
-        mode: "single",
-        domain,
-        job_id: jobId,
-        pid: child.pid,
-        started_at: startedAt,
-        pool_stats: poolStats(),
-      });
-    });
-  }
-
-  // Single domain status
-  if (method === "GET" && url.pathname === "/status") {
-    const domain = sanitizeDomain(url.searchParams.get("domain") || "");
-    if (!domain) {
-      return jsonResponse(res, 400, {
+    if (currentReservedDomainCount() + domains.length > MAX_ACTIVE_RESERVED_DOMAINS) {
+      return jsonResponse(res, 429, {
         ok: false,
-        error: "domain parameter required",
+        error: "Max active reserved domains would be exceeded by this batch.",
+        requested_domains: domains.length,
+        reserved_domains: currentReservedDomainCount(),
+        max_reserved_domains: MAX_ACTIVE_RESERVED_DOMAINS,
       });
     }
 
-    const jobKey = `single:${domain}`;
-    let jobId = null;
-    let progress = null;
-    let isDone = false;
+    const lockCheck = acquireBatchDomainLocks(
+      domains.map((d) => ({ domain: d, forceRescan })),
+      process.pid
+    );
 
-    if (activeJobs.has(jobKey)) {
-      const job = activeJobs.get(jobKey);
-      jobId = job.jobId;
-      progress = readProgress(jobId);
-      isDone = fs.existsSync(job.doneFlag);
-    } else {
-      try {
-        const safeDomain = domain.replace(/[^a-z0-9._-]/gi, "_");
-        const files = fs
-          .readdirSync(OUTPUT_DIR)
-          .filter((f) => f.startsWith(`progress_${safeDomain}`) && f.endsWith(".txt"))
-          .map((f) => ({
-            f,
-            mtime: fs.statSync(path.join(OUTPUT_DIR, f)).mtimeMs,
-          }))
-          .sort((a, b) => b.mtime - a.mtime);
-
-        if (files.length > 0) {
-          const fname = files[0].f;
-          jobId = fname.replace(/^progress_/, "").replace(/\.txt$/, "");
-          progress = readProgress(jobId);
-          isDone = fs.existsSync(doneFlagPath(jobId));
-        }
-      } catch (_) {}
+    if (lockCheck.conflicts.length) {
+      return jsonResponse(res, 409, {
+        ok: false,
+        error: "Some domains are already locked",
+        conflicts: lockCheck.conflicts,
+      });
     }
 
-    let pct = 0;
-    let statusText = "Unknown";
-    let isRunning = false;
+    releaseBatchDomainLocks(lockCheck.acquired, process.pid);
 
-    if (progress) {
-      const completed = parseInt(progress.completed || "0", 10);
-      const total = parseInt(progress.total || "1", 10);
-      pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-      statusText = progress.status || "Running...";
+    const meta = {
+      batchId,
+      startedAt,
+      status: "QUEUED",
+      domains,
+      tools: enabledTools,
+      childPid: null,
+      progressFile: progressFilePath(batchId),
+      logFile: logFilePath(batchId),
+    };
+    saveBatchMeta(meta);
+    initJobProgressFile(batchId, "", domains.length);
 
-      if (isDone) {
-        statusText = "Audit complete";
-        isRunning = false;
-      } else if (activeJobs.has(jobKey)) {
-        isRunning = true;
-        try {
-          process.kill(activeJobs.get(jobKey).pid, 0);
-        } catch (_) {
-          console.log(`[api] Cleaning up stale job entry for ${domain}`);
-          activeJobs.delete(jobKey);
-          isRunning = false;
-          statusText = "Scan was interrupted";
-        }
-      }
-    }
+    console.log(`[api] Starting multi-scan batch_id=${batchId} domains=${domains.length}`);
 
-    const logTail = jobId ? tailFile(logFilePath(jobId), 50) : "";
+    const child = spawn("node", ["multi-audit.js", ...domains], {
+      cwd: TOOL_DIR,
+      env: {
+        ...process.env,
+        PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH,
+        SCAN_BATCH_ID: batchId,
+        JOB_ID: batchId,
+        ENABLED_TOOLS: JSON.stringify(enabledTools),
+        FORCE_RESCAN: forceRescan ? "1" : "0",
+      },
+      detached: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    meta.childPid = child.pid;
+    meta.status = "RUNNING";
+    saveBatchMeta(meta);
+
+    const logFile = logFilePath(batchId);
+    child.stdout.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+    child.stderr.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+
+    activeJobs.set(batchKey, {
+      key: batchKey,
+      type: "multi",
+      batchId,
+      domains,
+      tools: enabledTools,
+      jobId: batchId,
+      pid: child.pid,
+      startedAt,
+      logFile,
+      forceRescan,
+    });
+
+    child.on("exit", (code, signal) => {
+      console.log(`[api] Multi-scan exited batch_id=${batchId}. code=${code} signal=${signal}`);
+      activeJobs.delete(batchKey);
+
+      const saved = getBatchMeta(batchId) || meta;
+      saved.status = code === 0 ? "DONE" : "ERROR";
+      saved.exitCode = code;
+      saved.signal = signal;
+      saved.finishedAt = nowIso();
+      saveBatchMeta(saved);
+    });
 
     return jsonResponse(res, 200, {
       ok: true,
-      mode: "single",
-      domain,
-      job_id: jobId,
-      done: isDone,
-      running: isRunning,
-      pct,
-      status: statusText,
-      progress: progress || {},
-      log_tail: logTail,
+      queued: true,
+      mode: "multi",
+      batch_id: batchId,
+      domains,
+      tools: enabledTools,
+      force_rescan: forceRescan,
+      count: domains.length,
+      pid: child.pid,
+      started_at: startedAt,
+      reserved_domains: currentReservedDomainCount(),
+      max_reserved_domains: MAX_ACTIVE_RESERVED_DOMAINS,
+      pool_stats: poolStats(),
     });
   }
 
-  // Single domain result
-  if (method === "GET" && url.pathname === "/result") {
+  // Single progress
+  if (method === "GET" && url.pathname === "/progress") {
+    const jobId = (url.searchParams.get("job_id") || "").trim();
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
-    if (!domain) {
-      return jsonResponse(res, 400, {
+
+    let progress = null;
+
+    if (jobId) {
+      progress = readProgress(jobId);
+    } else if (domain) {
+      const jobKey = `single:${domain}`;
+      if (activeJobs.has(jobKey)) {
+        progress = readProgress(activeJobs.get(jobKey).jobId);
+      }
+    }
+
+    if (!progress) {
+      return jsonResponse(res, 404, {
         ok: false,
-        error: "domain parameter required",
+        error: "No progress found",
       });
     }
 
-    const csvPath = findLatestDomainCSV(domain);
-    if (csvPath) {
-      const raw = readFileOrNull(csvPath);
-      if (raw) {
-        const rows = parseCSV(raw);
-        const row =
-          rows.find((r) => sanitizeDomain(r.Domain || "") === domain) ||
-          rows[rows.length - 1];
-
-        if (row) {
-          return jsonResponse(res, 200, {
-            ok: true,
-            mode: "single",
-            source: csvPath.endsWith("/summary.csv") ? "domain_summary_csv" : "domain_csv",
-            path: csvPath,
-            data: row,
-          });
-        }
-      }
-    }
-
-    const summaryHit = findLatestDomainInBatchSummary(domain);
-    if (summaryHit) {
-      return jsonResponse(res, 200, {
-        ok: true,
-        mode: "single",
-        source: "batch_summary_csv",
-        path: summaryHit.path,
-        data: summaryHit.row,
-      });
-    }
-
-    const latestPathHit = findDomainFromLatestPathFiles(domain);
-    if (latestPathHit) {
-      return jsonResponse(res, 200, {
-        ok: true,
-        mode: "single",
-        source: latestPathHit.source,
-        path: latestPathHit.path,
-        data: latestPathHit.row,
-      });
-    }
-
-    const recursiveHit = findDomainByRecursiveSearch(domain);
-    if (recursiveHit) {
-      return jsonResponse(res, 200, {
-        ok: true,
-        mode: "single",
-        source: recursiveHit.source,
-        path: recursiveHit.path,
-        data: recursiveHit.row,
-      });
-    }
-
-    return jsonResponse(res, 404, {
-      ok: false,
-      error: `No result found for domain: ${domain}`,
-      checked_path: csvPath || null,
+    return jsonResponse(res, 200, {
+      ok: true,
+      progress,
     });
   }
 
-  // Multi-scan
-  if (method === "POST" && url.pathname === "/multi-scan") {
-    return parseBodyJson(req, (err, parsed) => {
-      if (err) return jsonResponse(res, 400, { ok: false, error: err.message });
-
-      const domains = uniqueDomains(parsed.domains || []);
-      if (!Array.isArray(parsed.domains) || domains.length === 0) {
-        return jsonResponse(res, 400, {
-          ok: false,
-          error: "domains array is required",
-        });
-      }
-
-      const conflictingInMemory = domains.filter((d) => activeJobs.has(`single:${d}`));
-      if (conflictingInMemory.length > 0) {
-        return jsonResponse(res, 200, {
-          ok: false,
-          error: `These domains are already being scanned: ${conflictingInMemory.join(", ")}.`,
-          conflicting_domains: conflictingInMemory,
-        });
-      }
-
-      const reservedNow = currentReservedDomainCount();
-      if (reservedNow + domains.length > MAX_ACTIVE_RESERVED_DOMAINS) {
-        return jsonResponse(res, 429, {
-          ok: false,
-          error: `Server is busy. This batch needs ${domains.length} slots, but only ${Math.max(
-            0,
-            MAX_ACTIVE_RESERVED_DOMAINS - reservedNow
-          )} of ${MAX_ACTIVE_RESERVED_DOMAINS} are available.`,
-          requested_domains: domains.length,
-          reserved_domains: reservedNow,
-          max_reserved_domains: MAX_ACTIVE_RESERVED_DOMAINS,
-        });
-      }
-
-      const { conflicts: lockedConflicts } = acquireBatchDomainLocks(domains, process.pid);
-      if (lockedConflicts.length > 0) {
-        return jsonResponse(res, 200, {
-          ok: false,
-          error: `These domains are locked by another process: ${lockedConflicts.join(", ")}.`,
-          conflicting_domains: lockedConflicts,
-        });
-      }
-
-      const batchId = createBatchId();
-      const jobId = batchId;
-      const startedAt = nowIso();
-      const batchLogPath = path.join(API_BATCH_DIR, `${batchId}.log`);
-
-      initJobProgressFile(jobId, domains[0], domains.length);
-      writeTextSafe(batchLogPath, "");
-
-      const meta = {
-        batchId,
-        jobId,
-        mode: "multi",
-        status: "RUNNING",
-        startedAt,
-        finishedAt: "",
-        domains,
-        total: domains.length,
-        batchFolder: "",
-        batchPath: "",
-        summaryCsvPath: "",
-        statsJsonPath: "",
-        logPath: batchLogPath,
-        pid: null,
-      };
-      saveBatchMeta(meta);
-
-      const child = spawn("node", ["multi-audit.js", ...domains], {
-        cwd: TOOL_DIR,
-        detached: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PUPPETEER_EXECUTABLE_PATH: PUPPETEER_PATH,
-          JOB_ID: jobId,
-          DOMAIN_LOCK_ALREADY_HELD: "1",
-        },
-      });
-
-      const jobKey = `multi:${batchId}`;
-      const jobEntry = {
-        key: jobKey,
-        type: "multi",
-        batchId,
-        jobId,
-        pid: child.pid,
-        startedAt,
-        domains,
-        activeDomains: [],
-        batchFolder: "",
-        batchPath: "",
-        logPath: batchLogPath,
-        progressFile: progressFilePath(jobId),
-        doneFlag: doneFlagPath(jobId),
-      };
-      activeJobs.set(jobKey, jobEntry);
-
-      meta.pid = child.pid;
-      saveBatchMeta(meta);
-
-      function processBatchOutput(chunk, isErr) {
-        const text = String(chunk || "");
-        appendTextSafe(batchLogPath, isErr ? "[stderr] " + text : text);
-
-        for (const line of text.split("\n")) {
-          const t = line.trim();
-          if (!t) continue;
-
-          let m = t.match(/^__BATCH_FOLDER__:(.+)$/);
-          if (m && activeJobs.has(jobKey)) {
-            const entry = activeJobs.get(jobKey);
-            entry.batchFolder = m[1].trim();
-            entry.batchPath = path.join(SCAN_ROOT, entry.batchFolder);
-          }
-
-          m = t.match(/^__DOMAIN_START__:(.+?):(\d+):(.*)$/);
-          if (m && activeJobs.has(jobKey)) {
-            const entry = activeJobs.get(jobKey);
-            const domain = m[1].trim();
-            if (!entry.activeDomains.includes(domain)) {
-              entry.activeDomains.push(domain);
-            }
-          }
-
-          m = t.match(/^__DOMAIN_DONE__:(.+?):(\d+)$/);
-          if (m && activeJobs.has(jobKey)) {
-            const entry = activeJobs.get(jobKey);
-            entry.activeDomains = entry.activeDomains.filter((d) => d !== m[1].trim());
-          }
-        }
-      }
-
-      child.stdout.on("data", (data) => processBatchOutput(data, false));
-      child.stderr.on("data", (data) => processBatchOutput(data, true));
-
-      child.on("close", (code) => {
-        const entry = activeJobs.get(jobKey);
-        const currentMeta = getBatchMeta(batchId) || meta;
-        const guessedBatchPath =
-          (entry && entry.batchPath) ||
-          currentMeta.batchPath ||
-          findNewestBatchPathAfter(startedAt) ||
-          "";
-
-        const guessedBatchFolder = guessedBatchPath
-          ? path.basename(guessedBatchPath)
-          : currentMeta.batchFolder || "";
-
-        const summaryCsvPath = guessedBatchPath
-          ? path.join(guessedBatchPath, "summary.csv")
-          : "";
-        const statsJsonPath = guessedBatchPath
-          ? path.join(guessedBatchPath, "_batch_stats.json")
-          : "";
-
-        saveBatchMeta({
-          ...currentMeta,
-          status: code === 0 ? "DONE" : "FAILED",
-          finishedAt: nowIso(),
-          batchFolder: guessedBatchFolder,
-          batchPath: guessedBatchPath,
-          summaryCsvPath,
-          statsJsonPath,
-          pid: child.pid,
-        });
-
-        releaseBatchDomainLocks(domains, process.pid);
-        activeJobs.delete(jobKey);
-      });
-
-      child.on("error", () => {
-        releaseBatchDomainLocks(domains, process.pid);
-        activeJobs.delete(jobKey);
-      });
-
-      return jsonResponse(res, 200, {
-        ok: true,
-        queued: true,
-        mode: "multi",
-        batch_id: batchId,
-        job_id: jobId,
-        total: domains.length,
-        started_at: startedAt,
-        pid: child.pid,
-      });
-    });
-  }
-
-  // Multi-scan status
-  if (method === "GET" && url.pathname === "/multi-status") {
+  // Batch progress
+  if (method === "GET" && url.pathname === "/multi-progress") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
     if (!batchId) {
-      return jsonResponse(res, 400, {
-        ok: false,
-        error: "batch_id parameter required",
-      });
+      return jsonResponse(res, 400, { ok: false, error: "Missing batch_id" });
     }
 
     const meta = getBatchMeta(batchId);
-    if (!meta) {
-      return jsonResponse(res, 404, { ok: false, error: "Unknown batch_id" });
-    }
+    const progress = readProgress(batchId);
 
-    const jobKey = `multi:${batchId}`;
-    const jobId = meta.jobId || batchId;
-    const progress = readProgress(jobId);
-    const logTail = tailFile(meta.logPath || path.join(API_BATCH_DIR, `${batchId}.log`), 60);
-
-    if (activeJobs.has(jobKey)) {
-      const entry = activeJobs.get(jobKey);
-      const completed = parseInt(progress?.completed || "0", 10);
-      const total = parseInt(progress?.total || String(meta.total || 0), 10);
-      const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-
-      return jsonResponse(res, 200, {
-        ok: true,
-        mode: "multi",
-        batch_id: batchId,
-        job_id: jobId,
-        done: false,
-        running: true,
-        status: progress?.status || "RUNNING",
-        pct,
-        completed,
-        total,
-        batch_folder: entry.batchFolder || meta.batchFolder || "",
-        batch_path: entry.batchPath || meta.batchPath || "",
-        log_tail: logTail,
-      });
-    }
-
-    const batchPath = meta.batchPath || findNewestBatchPathAfter(meta.startedAt) || "";
-    const statsPath = meta.statsJsonPath || (batchPath ? path.join(batchPath, "_batch_stats.json") : "");
-    const summaryPath = meta.summaryCsvPath || (batchPath ? path.join(batchPath, "summary.csv") : "");
-    const stats = statsPath ? readJsonOrNull(statsPath) : null;
-
-    let total = meta.total || 0;
-    let completed = total;
-    let failed = 0;
-    let pct = total > 0 ? 100 : 0;
-
-    if (stats) {
-      total = stats.total || total;
-      completed = (stats.successful || 0) + (stats.failed || 0);
-      failed = stats.failed || 0;
-      pct = total > 0 ? Math.round((completed / total) * 100) : 100;
+    if (!meta && !progress) {
+      return jsonResponse(res, 404, { ok: false, error: "Batch not found" });
     }
 
     return jsonResponse(res, 200, {
       ok: true,
-      mode: "multi",
       batch_id: batchId,
-      job_id: jobId,
-      done: true,
-      running: false,
-      status: meta.status || "DONE",
-      pct,
-      total,
-      completed,
-      failed,
-      batch_folder: batchPath ? path.basename(batchPath) : meta.batchFolder || "",
-      batch_path: batchPath,
-      summary_csv: summaryPath || "",
-      stats_json: statsPath || "",
-      log_tail: logTail,
+      meta,
+      progress,
     });
   }
 
-  // Multi-scan result
+  // Single result
+  if (method === "GET" && url.pathname === "/result") {
+    const domain = sanitizeDomain(url.searchParams.get("domain") || "");
+    const jobId = (url.searchParams.get("job_id") || "").trim();
+
+    if (!domain && !jobId) {
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "Missing domain or job_id",
+      });
+    }
+
+    let resolvedDomain = domain;
+
+    if (!resolvedDomain && jobId) {
+      for (const job of activeJobs.values()) {
+        if (job.type === "single" && job.jobId === jobId) {
+          resolvedDomain = job.domain;
+          break;
+        }
+      }
+    }
+
+    if (!resolvedDomain && jobId) {
+      const progress = readProgress(jobId);
+      if (progress && progress.domain) {
+        resolvedDomain = sanitizeDomain(progress.domain);
+      }
+    }
+
+    if (!resolvedDomain) {
+      return jsonResponse(res, 404, {
+        ok: false,
+        error: "Could not resolve domain for result lookup",
+      });
+    }
+
+    const found = findSingleResult(resolvedDomain);
+    if (!found) {
+      return jsonResponse(res, 404, {
+        ok: false,
+        error: `No result found yet for ${resolvedDomain}`,
+      });
+    }
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      domain: resolvedDomain,
+      csv_path: found.csv_path,
+      data: found.data,
+    });
+  }
+
+  // Batch result
   if (method === "GET" && url.pathname === "/multi-result") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
     if (!batchId) {
-      return jsonResponse(res, 400, {
-        ok: false,
-        error: "batch_id parameter required",
-      });
+      return jsonResponse(res, 400, { ok: false, error: "Missing batch_id" });
     }
 
     const meta = getBatchMeta(batchId);
     if (!meta) {
-      return jsonResponse(res, 404, { ok: false, error: "Unknown batch_id" });
+      return jsonResponse(res, 404, { ok: false, error: "Batch not found" });
     }
 
-    const batchPath = meta.batchPath || findNewestBatchPathAfter(meta.startedAt) || "";
-    const summaryPath = meta.summaryCsvPath || (batchPath ? path.join(batchPath, "summary.csv") : "");
-    const statsPath = meta.statsJsonPath || (batchPath ? path.join(batchPath, "_batch_stats.json") : "");
+    let batchRoot = null;
+    try {
+      const latestPath = readFileOrNull(latestPathFile(batchId));
+      if (latestPath) {
+        batchRoot = path.dirname(path.dirname(latestPath.trim()));
+      }
+    } catch (_) {}
 
-    if (!summaryPath || !fs.existsSync(summaryPath)) {
+    if (!batchRoot) {
+      try {
+        const entries = fs.readdirSync(SCAN_ROOT);
+        let bestMtime = 0;
+        for (const entry of entries) {
+          if (!/^\d{4}-\d{2}-\d{2}/.test(entry)) continue;
+          const full = path.join(SCAN_ROOT, entry);
+          const stat = fs.statSync(full);
+          if (stat.isDirectory() && stat.mtimeMs > bestMtime) {
+            bestMtime = stat.mtimeMs;
+            batchRoot = full;
+          }
+        }
+      } catch (_) {}
+    }
+
+    const csvPath = findBatchCSV(batchRoot);
+    if (!csvPath || !fs.existsSync(csvPath)) {
       return jsonResponse(res, 404, {
         ok: false,
-        error: "Batch summary.csv not found yet",
-        batch_id: batchId,
+        error: "No batch CSV found yet",
+        batch_root: batchRoot,
       });
     }
 
-    const raw = readFileOrNull(summaryPath);
-    if (!raw) {
-      return jsonResponse(res, 404, {
-        ok: false,
-        error: "Batch summary.csv is empty or unreadable",
-        batch_id: batchId,
-      });
-    }
-
-    const rows = parseCSV(raw);
-    const stats = statsPath ? readJsonOrNull(statsPath) : null;
-
+    const rows = parseCSV(fs.readFileSync(csvPath, "utf8"));
     return jsonResponse(res, 200, {
       ok: true,
-      mode: "multi",
       batch_id: batchId,
-      batch_path: batchPath,
-      summary_csv: summaryPath,
-      total_results: rows.length,
-      stats: stats || null,
-      results: rows,
+      batch_root: batchRoot,
+      csv_path: csvPath,
+      count: rows.length,
+      data: rows,
+      tools: meta.tools || [],
     });
   }
 
-  // Multi-scan log
-  if (method === "GET" && url.pathname === "/multi-log") {
-    const batchId = (url.searchParams.get("batch_id") || "").trim();
+  // Single stop
+  if (method === "POST" && url.pathname === "/stop") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const domain = sanitizeDomain(parsed.domain);
+    const jobId = (parsed.job_id || "").trim();
+
+    let keyToStop = null;
+    let job = null;
+
+    if (domain) {
+      const key = `single:${domain}`;
+      if (activeJobs.has(key)) {
+        keyToStop = key;
+        job = activeJobs.get(key);
+      }
+    } else if (jobId) {
+      for (const [key, j] of activeJobs.entries()) {
+        if (j.type === "single" && j.jobId === jobId) {
+          keyToStop = key;
+          job = j;
+          break;
+        }
+      }
+    }
+
+    if (!job) {
+      return jsonResponse(res, 404, { ok: false, error: "Single job not found" });
+    }
+
+    const killed = killProcess(job.pid);
+    if (job.domain) releaseDomainLock(job.domain, job.pid);
+    activeJobs.delete(keyToStop);
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      stopped: killed,
+      domain: job.domain,
+      job_id: job.jobId,
+      pid: job.pid,
+    });
+  }
+
+  // Batch stop
+  if (method === "POST" && url.pathname === "/stop-multi") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const batchId = (parsed.batch_id || "").trim();
     if (!batchId) {
-      return jsonResponse(res, 400, {
-        ok: false,
-        error: "batch_id parameter required",
+      return jsonResponse(res, 400, { ok: false, error: "Missing batch_id" });
+    }
+
+    const key = `multi:${batchId}`;
+    if (!activeJobs.has(key)) {
+      return jsonResponse(res, 404, { ok: false, error: "Batch job not found" });
+    }
+
+    const job = activeJobs.get(key);
+    const killed = killProcess(job.pid);
+    releaseBatchDomainLocks(job.domains, job.pid);
+    activeJobs.delete(key);
+
+    const meta = getBatchMeta(batchId);
+    if (meta) {
+      meta.status = "STOPPED";
+      meta.finishedAt = nowIso();
+      saveBatchMeta(meta);
+    }
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      stopped: killed,
+      batch_id: batchId,
+      pid: job.pid,
+      domains: job.domains,
+    });
+  }
+
+  // Single status
+  if (method === "GET" && url.pathname === "/status") {
+    const domain = sanitizeDomain(url.searchParams.get("domain") || "");
+    const jobId = (url.searchParams.get("job_id") || "").trim();
+
+    let job = null;
+    if (domain) {
+      job = activeJobs.get(`single:${domain}`) || null;
+    } else if (jobId) {
+      for (const j of activeJobs.values()) {
+        if (j.type === "single" && j.jobId === jobId) {
+          job = j;
+          break;
+        }
+      }
+    }
+
+    if (!job) {
+      return jsonResponse(res, 200, {
+        ok: true,
+        running: false,
       });
     }
 
-    const meta = getBatchMeta(batchId);
-    if (!meta) {
-      return jsonResponse(res, 404, { ok: false, error: "Unknown batch_id" });
+    return jsonResponse(res, 200, {
+      ok: true,
+      running: true,
+      domain: job.domain,
+      job_id: job.jobId,
+      pid: job.pid,
+      started_at: job.startedAt,
+      tools: job.tools || [],
+    });
+  }
+
+  // Batch status
+  if (method === "GET" && url.pathname === "/multi-status") {
+    const batchId = (url.searchParams.get("batch_id") || "").trim();
+    if (!batchId) {
+      return jsonResponse(res, 400, { ok: false, error: "Missing batch_id" });
     }
 
-    const log = readFileOrNull(meta.logPath) || "(no batch log yet)";
+    const key = `multi:${batchId}`;
+    const job = activeJobs.get(key) || null;
+    const meta = getBatchMeta(batchId) || null;
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      running: !!job,
+      batch_id: batchId,
+      job: job
+        ? {
+            pid: job.pid,
+            started_at: job.startedAt,
+            domains: job.domains,
+            tools: job.tools || [],
+          }
+        : null,
+      meta,
+    });
+  }
+
+  // Batch log
+  if (method === "GET" && url.pathname === "/multi-log") {
+    const batchId = (url.searchParams.get("batch_id") || "").trim();
+    if (!batchId) {
+      return jsonResponse(res, 400, { ok: false, error: "Missing batch_id" });
+    }
+
+    const log = readFileOrNull(logFilePath(batchId)) || "(no log yet)";
     res.writeHead(200, {
       "Content-Type": "text/plain; charset=utf-8",
       "Access-Control-Allow-Origin": "*",
     });
     return res.end(log);
+  }
+
+  // Done check — fastest way for the HTML to know results are ready.
+  if (method === "GET" && url.pathname === "/done") {
+    const jobId = (url.searchParams.get("job_id") || "").trim();
+    if (!jobId) {
+      return jsonResponse(res, 400, { ok: false, error: "Missing job_id" });
+    }
+    const flagPath = doneFlagPath(jobId);
+    const isDone = fs.existsSync(flagPath);
+    return jsonResponse(res, 200, { ok: true, done: isDone });
   }
 
   // Single log
