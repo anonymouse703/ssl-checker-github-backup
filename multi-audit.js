@@ -130,7 +130,8 @@ if (!fs.existsSync(OUTPUT_DIR)) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-function writeProgress(completed, total, lastDomain, finishTime, status) {
+// ── Updated writeProgress — now tracks per-domain completion lists ────────────
+function writeProgress(completed, total, lastDomain, finishTime, status, completedList, failedList) {
     try {
         const lines = [
             `completed=${completed}`,
@@ -139,6 +140,8 @@ function writeProgress(completed, total, lastDomain, finishTime, status) {
             `last_finish=${finishTime}`,
             `status=${status}`,
             `job_id=${JOB_ID}`,
+            `completed_domains=${(completedList || []).join(',')}`,
+            `failed_domains=${(failedList || []).join(',')}`,
         ];
         fs.writeFileSync(PROGRESS_FILE, lines.join('\n'), 'utf8');
         const pct = Math.round((completed / total) * 100);
@@ -183,7 +186,7 @@ console.log(`           ├── sucuri.png`);
 console.log(`           └── ...\n`);
 
 // Write initial progress
-writeProgress(0, total, '', '', 'RUNNING');
+writeProgress(0, total, '', '', 'RUNNING', [], []);
 
 const overallStart = Date.now();
 const results = {
@@ -226,20 +229,6 @@ function checkMemory() {
     }
     
     return rssMB;
-}
-
-function sanitizeDomain(raw) {
-    let s = String(raw || '').trim().toLowerCase();
-
-    s = s.replace(/^https?:\/\//i, '');
-    s = s.replace(/^www\./i, '');
-    s = s.split('/')[0];
-    s = s.split('?')[0];
-    s = s.split('#')[0];
-    s = s.replace(/:\d+$/, '');
-    s = s.replace(/\.+$/, '');
-
-    return s;
 }
 
 // Start memory monitor
@@ -370,12 +359,15 @@ function runAudit(domain, groupNum, posInGroup) {
 
       const doneCount = results.completed.length + results.failed.length;
 
+      // ── Pass per-domain lists into writeProgress ──────────────────────────
       writeProgress(
         doneCount,
         total,
         domain,
         finishTime,
-        code === 0 ? `RUNNING — completed ${domain}` : `RUNNING — failed ${domain}`
+        code === 0 ? `RUNNING — completed ${domain}` : `RUNNING — failed ${domain}`,
+        results.completed,
+        results.failed
       );
 
       resolve({
@@ -526,8 +518,8 @@ async function runAll() {
     if (results.failed.length === 0) console.log('\n🎉 100% success rate!');
     console.log(`\n✅ Multi-audit completed`);
 
-    // Mark progress as complete
-    writeProgress(total, total, '', '', `DONE - ${total} domains completed`);
+    // ── Mark progress as complete — pass final lists ──────────────────────────
+    writeProgress(total, total, '', '', `DONE - ${total} domains completed`, results.completed, results.failed);
     
     // Clear memory monitor
     clearInterval(memoryMonitor);

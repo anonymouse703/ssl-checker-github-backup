@@ -721,9 +721,6 @@ async function handleRequest(req, res) {
     );
 
     // Always clear any stale lock file before spawning the child.
-    // At this point activeJobs confirmed no scan is running for this domain,
-    // so any leftover lock file is from a previous crashed/finished child and
-    // must be removed — otherwise the new child's acquireDomainLock() will fail.
     try {
       const lockFile = domainLockPath(domain);
       if (fs.existsSync(lockFile)) {
@@ -770,7 +767,6 @@ async function handleRequest(req, res) {
         `done\ncode=${code}\nsignal=${signal}\nfinishedAt=${nowIso()}\ndomain=${domain}`
       );
 
-      // Release the domain lock so the same domain can be re-scanned immediately.
       releaseDomainLock(domain, child.pid);
 
       activeJobs.delete(jobKey);
@@ -959,11 +955,21 @@ async function handleRequest(req, res) {
       return jsonResponse(res, 404, { ok: false, error: "Batch not found" });
     }
 
+    // ── Parse per-domain lists written by multi-audit.js ─────────────────────
+    const completedDomains = (progress && progress.completed_domains)
+      ? progress.completed_domains.split(",").filter(Boolean)
+      : [];
+    const failedDomains = (progress && progress.failed_domains)
+      ? progress.failed_domains.split(",").filter(Boolean)
+      : [];
+
     return jsonResponse(res, 200, {
       ok: true,
       batch_id: batchId,
       meta,
       progress,
+      completed_domains: completedDomains,
+      failed_domains: failedDomains,
     });
   }
 
@@ -1072,6 +1078,7 @@ async function handleRequest(req, res) {
       batch_root: batchRoot,
       csv_path: csvPath,
       count: rows.length,
+      results: rows,
       data: rows,
       tools: meta.tools || [],
     });
@@ -1242,7 +1249,7 @@ async function handleRequest(req, res) {
     return res.end(log);
   }
 
-  // Done check — fastest way for the HTML to know results are ready.
+  // Done check
   if (method === "GET" && url.pathname === "/done") {
     const jobId = (url.searchParams.get("job_id") || "").trim();
     if (!jobId) {
@@ -1304,6 +1311,47 @@ async function handleRequest(req, res) {
     }
   }
 
+  if (method === "GET" && url.pathname === "/jobs-monitor") {
+    try {
+      const html = fs.readFileSync(path.join(TOOL_DIR, "jobs-monitor.html"), "utf8");
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+      });
+      return res.end(html);
+    } catch (e) {
+      return jsonResponse(res, 500, { ok: false, error: "Could not load jobs-monitor.html: " + e.message });
+    }
+  }
+
+  //format local ymd
+
+  function formatLocalYmd(dateObj) {
+    return (
+      dateObj.getFullYear() +
+      "-" +
+      String(dateObj.getMonth() + 1).padStart(2, "0") +
+      "-" +
+      String(dateObj.getDate()).padStart(2, "0")
+    );
+  }
+
+  function extractFolderDateMs(entryName) {
+    const m = String(entryName || "").match(/^(\d{4})-(\d{2})-(\d{2})(?:_|$)/);
+    if (!m) return null;
+
+    const yyyy = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10) - 1;
+    const dd = parseInt(m[3], 10);
+
+    return new Date(yyyy, mm, dd, 0, 0, 0, 0).getTime();
+  }
+
+  function isCurrentDayFolder(entryName) {
+    const folderDate = String(entryName || "").split("_")[0];
+    return folderDate === formatLocalYmd(new Date());
+  }
+
   // Cleanup API helper files
   if (method === "GET" && url.pathname === "/cleanup-api-files") {
     const hours = parseInt(url.searchParams.get("hours") || "24", 10);
@@ -1349,7 +1397,7 @@ async function handleRequest(req, res) {
     });
   }
 
-  // List all jobs
+  // List all jobs — includes domains array for multi jobs
   if (method === "GET" && url.pathname === "/jobs") {
     return jsonResponse(res, 200, {
       ok: true,
@@ -1363,6 +1411,8 @@ async function handleRequest(req, res) {
         jobId: j.jobId,
         pid: j.pid,
         startedAt: j.startedAt,
+        tools: j.tools || [],
+        domains: j.domains || null,
       })),
       pool_stats: poolStats(),
     });
@@ -1371,28 +1421,52 @@ async function handleRequest(req, res) {
   // Cleanup old batch folders (keep latest X days)
   if (method === "GET" && url.pathname === "/cleanup-batches") {
     const days = parseInt(url.searchParams.get("days") || "7", 10);
+
+    if (isNaN(days) || days <= 0) {
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "days parameter must be a positive integer",
+      });
+    }
+
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const deleted = [];
+    const skipped = [];
     const errors = [];
 
     try {
       const entries = fs.readdirSync(SCAN_ROOT);
+
       for (const entry of entries) {
         if (!/^\d{4}-\d{2}-\d{2}_/.test(entry)) continue;
-        
+
         const fullPath = path.join(SCAN_ROOT, entry);
+
         try {
           const stat = fs.statSync(fullPath);
-          if (stat.isDirectory() && stat.mtimeMs < cutoff) {
-            const folderDate = entry.split('_')[0];
-            const now = new Date();
-            const isCurrentDay = folderDate === `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-            
-            if (!isCurrentDay) {
-              fs.rmSync(fullPath, { recursive: true, force: true });
-              deleted.push(entry);
-              console.log(`[cleanup] Deleted old batch: ${entry}`);
-            }
+
+          if (!stat.isDirectory()) {
+            skipped.push({ entry, reason: "not a directory" });
+            continue;
+          }
+
+          const folderDateMs = extractFolderDateMs(entry);
+          if (folderDateMs == null) {
+            skipped.push({ entry, reason: "invalid folder date format" });
+            continue;
+          }
+
+          if (isCurrentDayFolder(entry)) {
+            skipped.push({ entry, reason: "current day folder" });
+            continue;
+          }
+
+          if (folderDateMs < cutoff) {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+            deleted.push(entry);
+            console.log(`[cleanup] Deleted old batch: ${entry}`);
+          } else {
+            skipped.push({ entry, reason: "newer than cutoff" });
           }
         } catch (e) {
           errors.push({ entry, error: e.message });
@@ -1402,12 +1476,13 @@ async function handleRequest(req, res) {
       return jsonResponse(res, 500, { ok: false, error: e.message });
     }
 
-    return jsonResponse(res, 200, { 
-      ok: true, 
-      deleted, 
-      errors, 
+    return jsonResponse(res, 200, {
+      ok: true,
+      deleted,
+      skipped,
+      errors,
       days,
-      message: `Deleted ${deleted.length} batch folders older than ${days} days`
+      message: `Deleted ${deleted.length} batch folders older than ${days} days`,
     });
   }
 
@@ -1502,20 +1577,52 @@ async function handleRequest(req, res) {
   // Cleanup old scan folders (backward compatibility)
   if (method === "GET" && url.pathname === "/cleanup") {
     const days = parseInt(url.searchParams.get("days") || "7", 10);
+
+    if (isNaN(days) || days <= 0) {
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "days parameter must be a positive integer",
+      });
+    }
+
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const deleted = [];
+    const skipped = [];
     const errors = [];
 
     try {
       const entries = fs.readdirSync(SCAN_ROOT);
+
       for (const entry of entries) {
         if (!/^\d{4}-\d{2}-\d{2}/.test(entry)) continue;
+
         const fullPath = path.join(SCAN_ROOT, entry);
+
         try {
           const stat = fs.statSync(fullPath);
-          if (stat.isDirectory() && stat.mtimeMs < cutoff) {
+
+          if (!stat.isDirectory()) {
+            skipped.push({ entry, reason: "not a directory" });
+            continue;
+          }
+
+          const folderDateMs = extractFolderDateMs(entry);
+          if (folderDateMs == null) {
+            skipped.push({ entry, reason: "invalid folder date format" });
+            continue;
+          }
+
+          if (isCurrentDayFolder(entry)) {
+            skipped.push({ entry, reason: "current day folder" });
+            continue;
+          }
+
+          if (folderDateMs < cutoff) {
             fs.rmSync(fullPath, { recursive: true, force: true });
             deleted.push(entry);
+            console.log(`[cleanup] Deleted old scan folder: ${entry}`);
+          } else {
+            skipped.push({ entry, reason: "newer than cutoff" });
           }
         } catch (e) {
           errors.push({ entry, error: e.message });
@@ -1525,7 +1632,13 @@ async function handleRequest(req, res) {
       return jsonResponse(res, 500, { ok: false, error: e.message });
     }
 
-    return jsonResponse(res, 200, { ok: true, deleted, errors, days });
+    return jsonResponse(res, 200, {
+      ok: true,
+      deleted,
+      skipped,
+      errors,
+      days,
+    });
   }
 
   return jsonResponse(res, 404, {

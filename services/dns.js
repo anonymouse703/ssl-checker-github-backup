@@ -8,8 +8,8 @@ const {
   wait,
 } = require('../utils/screenshot');
 
-const DNS_VIEWPORT_WIDTH = 1545;
-const DNS_VIEWPORT_HEIGHT = 900;
+const DNS_VIEWPORT_WIDTH = 1080;
+const DNS_VIEWPORT_HEIGHT = 935;
 const DNS_TOP_CROP = 0;
 
 async function runWhatsMyDNS(domain, context) {

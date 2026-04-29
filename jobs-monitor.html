@@ -1,0 +1,1083 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>SSL Checker — Jobs Monitor</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 14px;
+        background: #f3f3f3;
+        color: #222;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+      }
+
+      .page-title {
+        font-size: 16px;
+        font-weight: bold;
+        margin: 0 0 10px 0;
+      }
+
+      .panel {
+        background: #fff;
+        border: 1px solid #d8d8d8;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
+      }
+
+      .top-bar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: space-between;
+      }
+
+      .top-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .server-pill {
+        display: inline-block;
+        padding: 3px 12px;
+        background: #f0faf4;
+        color: #1f8b3a;
+        border-radius: 14px;
+        font-weight: bold;
+      }
+
+      .muted {
+        color: #666;
+        font-size: 12px;
+      }
+
+      .btn {
+        height: 28px;
+        padding: 0 14px;
+        border-radius: 7px;
+        border: 1px solid #ccc;
+        background: #f7f7f7;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .btn:hover { background: #eee; }
+
+      .btn-blue {
+        background: #185fa5;
+        color: #fff;
+        border-color: #185fa5;
+      }
+
+      .btn-blue:hover { background: #1470b8; }
+
+      .btn-red {
+        background: #dc3545;
+        color: #fff;
+        border-color: #dc3545;
+      }
+
+      .btn-red:hover { background: #c02737; }
+
+      .stats-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .stat-box {
+        background: #f8f9fc;
+        padding: 10px 16px;
+        border-radius: 10px;
+        text-align: center;
+        flex: 1;
+        min-width: 80px;
+        border: 1px solid #e5e5e5;
+      }
+
+      .stat-number {
+        font-size: 22px;
+        font-weight: bold;
+        color: #185fa5;
+      }
+
+      .stat-label {
+        font-size: 11px;
+        color: #777;
+        margin-top: 2px;
+      }
+
+      .refresh-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #28a745;
+        margin-right: 5px;
+        vertical-align: middle;
+      }
+
+      .last-updated {
+        font-size: 11px;
+        color: #888;
+      }
+
+      .jobs-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .server-block {
+        border: 1px solid #e3e3e3;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .server-header {
+        background: #f4f8f5;
+        border-bottom: 1px solid #e3e3e3;
+        padding: 10px 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .server-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: #1f8b3a;
+      }
+
+      .server-meta {
+        font-size: 11px;
+        color: #777;
+      }
+
+      .server-jobs {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .job-row {
+        padding: 10px 14px;
+        border-bottom: 1px solid #f0f0f0;
+        transition: opacity 1.5s ease;
+      }
+
+      .job-row:last-child {
+        border-bottom: none;
+      }
+
+      .job-main {
+        display: grid;
+        grid-template-columns: minmax(220px, 1.8fr) minmax(160px, 1fr) minmax(140px, 1fr) auto;
+        gap: 12px;
+        align-items: start;
+      }
+
+      .job-domain {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .domain-text {
+        font-weight: 600;
+        color: #185fa5;
+        word-break: break-word;
+      }
+
+      .type-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 10px;
+        font-weight: 700;
+      }
+
+      .type-single {
+        background: #fff3cd;
+        color: #856404;
+      }
+
+      .type-multi {
+        background: #e2d9f3;
+        color: #5a2d91;
+      }
+
+      .status-badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-size: 10px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .status-running {
+        background: #185fa5;
+        color: #fff;
+      }
+
+      .status-done {
+        background: #28a745;
+        color: #fff;
+      }
+
+      .status-idle {
+        background: #6c757d;
+        color: #fff;
+      }
+
+      .pb-wrap {
+        min-width: 120px;
+      }
+
+      .pb-track {
+        width: 100%;
+        height: 7px;
+        background: #e0e0e0;
+        border-radius: 20px;
+        overflow: hidden;
+        margin-bottom: 3px;
+      }
+
+      .pb-fill {
+        height: 7px;
+        background: #1f78d1;
+        border-radius: 20px;
+        transition: width 0.3s ease;
+      }
+
+      .pb-fill.done {
+        background: #28a745;
+      }
+
+      .pb-fill.indeterminate {
+        width: 100% !important;
+        background: repeating-linear-gradient(
+          45deg,
+          #1f78d1,
+          #1f78d1 10px,
+          #4a90e2 10px,
+          #4a90e2 20px
+        );
+        background-size: 200% 100%;
+        animation: progress-bar-stripes 1s linear infinite;
+      }
+
+      @keyframes progress-bar-stripes {
+        from { background-position: 0 0; }
+        to { background-position: 40px 0; }
+      }
+
+      .pb-text {
+        font-size: 10px;
+        color: #777;
+      }
+
+      .job-meta {
+        font-size: 11px;
+        color: #777;
+        line-height: 1.4;
+      }
+
+      .job-actions {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .view-link {
+        font-size: 11px;
+        color: #185fa5;
+        text-decoration: none;
+      }
+
+      .view-link:hover {
+        text-decoration: underline;
+      }
+
+      .tools-line {
+        margin-top: 6px;
+        font-size: 11px;
+        color: #666;
+      }
+
+      .log-row {
+        display: none;
+        margin-top: 8px;
+      }
+
+      .log-box {
+        background: #1e1e1e;
+        color: #d4d4d4;
+        border-radius: 6px;
+        padding: 10px;
+        min-height: 80px;
+        max-height: 220px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 40px;
+        color: #aaa;
+      }
+
+      .domain-rows {
+        margin-top: 8px;
+        border-top: 1px solid #f0f0f0;
+        padding-top: 6px;
+      }
+
+      .domain-row-item {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 3px 0;
+      }
+
+      .domain-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        transition: background 0.3s ease;
+      }
+
+      .domain-row-name {
+        font-size: 11px;
+        color: #333;
+        flex: 1;
+      }
+
+      .domain-row-status {
+        font-size: 10px;
+        color: #888;
+        min-width: 44px;
+        text-align: right;
+      }
+
+      .domain-row-item.is-done .domain-row-name { color: #1a6e31; }
+      .domain-row-item.is-failed .domain-row-name { color: #b02030; }
+      .domain-row-item.is-running .domain-row-name { color: #185fa5; font-weight: 600; }
+
+      @media (max-width: 980px) {
+        .job-main {
+          grid-template-columns: 1fr;
+        }
+        .job-actions {
+          justify-content: flex-start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page-title">🖥️ Jobs Monitor</div>
+
+    <div class="panel" style="padding:10px 18px; margin-bottom:12px;">
+      <div class="top-bar">
+        <div class="top-left">
+          <span class="muted">Servers:</span>
+          <span id="serverPills"></span>
+          <span id="refreshIndicator" style="margin-left:6px; font-size:11px; color:#666;">
+            <span class="refresh-dot"></span>Live
+          </span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span class="last-updated muted" id="lastUpdated"></span>
+          <button class="btn btn-blue" onclick="refreshAll()">↺ Refresh Now</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="statsPanel">
+      <div class="stats-row">
+        <div class="stat-box"><div class="stat-number" id="statTotal">0</div><div class="stat-label">Total Jobs</div></div>
+        <div class="stat-box"><div class="stat-number" id="statSingle" style="color:#856404;">0</div><div class="stat-label">Single</div></div>
+        <div class="stat-box"><div class="stat-number" id="statMulti" style="color:#5a2d91;">0</div><div class="stat-label">Multi-Batch</div></div>
+        <div class="stat-box"><div class="stat-number" id="statDomains">0</div><div class="stat-label">Domains Active</div></div>
+        <div class="stat-box"><div class="stat-number" id="statReserved">—/—</div><div class="stat-label">Reserved Slots</div></div>
+      </div>
+    </div>
+
+    <div class="panel" id="jobsPanel">
+      <div class="section-title" style="font-size:14px;font-weight:bold;margin:0 0 10px 0;">Active Jobs by Server</div>
+      <div id="jobsGroupedWrap">
+        <div class="empty-state">No scanning is ongoing.</div>
+      </div>
+    </div>
+
+    <script>
+    (function() {
+      var ACTIVE_REFRESH_MS = 2500;
+      var IDLE_REFRESH_MS = 10000;
+      var EMPTY_CLEAR_DELAY_MS = 1200;
+      var refreshTimer = null;
+      var emptyClearTimer = null;
+      var allJobs = [];
+      var openLogs = {};
+      var fetchedServers = {};
+      var pendingFetches = 0;
+      var doneKeys = {};       // tracks job keys already marked done
+      var lastJobKeys = null;  // tracks previous job key set for smart re-render
+
+      function byId(id) {
+        return document.getElementById(id);
+      }
+
+      function getParam(name) {
+        var qs = window.location.search.substring(1);
+        var parts = qs.split("&");
+        for (var i = 0; i < parts.length; i++) {
+          var pair = parts[i].split("=");
+          if (decodeURIComponent(pair[0] || "") === name) {
+            return decodeURIComponent((pair[1] || "").replace(/\+/g, " "));
+          }
+        }
+        return "";
+      }
+
+      function parseServers() {
+        var raw = getParam("servers");
+        if (raw) {
+          var arr = raw.split(",");
+          var out = [];
+          for (var i = 0; i < arr.length; i++) {
+            var s = arr[i];
+            var parts = s.split("|");
+            var base = (parts[1] || parts[0] || "");
+            if (base.charAt(base.length - 1) === "/") {
+              base = base.substring(0, base.length - 1);
+            }
+            if (base) {
+              out.push({
+                name: parts[0] || s,
+                base: base
+              });
+            }
+          }
+          return out;
+        }
+
+        var host = getParam("host") || getParam("server_host") || window.location.hostname;
+        var port = getParam("port") || "3000";
+        var name = getParam("server_name") || host;
+
+        return [{
+          name: name,
+          base: "http://" + host + ":" + port
+        }];
+      }
+
+      var SERVERS = parseServers();
+
+      function esc(s) {
+        return String(s || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function elapsed(startedAt) {
+        if (!startedAt) return "—";
+        var d = new Date(startedAt);
+        var t = d.getTime();
+        if (isNaN(t)) return "—";
+        var diff = Math.floor((new Date().getTime() - t) / 1000);
+        if (diff < 0) return "—";
+        if (diff < 60) return diff + "s";
+        if (diff < 3600) return Math.floor(diff / 60) + "m " + (diff % 60) + "s";
+        return Math.floor(diff / 3600) + "h " + Math.floor((diff % 3600) / 60) + "m";
+      }
+
+      function jobKey(j) {
+        return (j._server || "") + ":" + (j.batchId || j.jobId || j.key || j.domain || "");
+      }
+
+      function xhrGetJson(url, okFn, errFn) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", url, true);
+        xhr.timeout = 8000;
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          try {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              okFn(JSON.parse(xhr.responseText));
+            } else {
+              if (errFn) errFn(xhr.status);
+            }
+          } catch (e) {
+            if (errFn) errFn(e);
+          }
+        };
+        xhr.ontimeout = function() {
+          if (errFn) errFn("timeout");
+        };
+        xhr.send(null);
+      }
+
+      function xhrGetText(url, okFn) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", url, true);
+        xhr.timeout = 8000;
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState === 4 && xhr.status === 200) okFn(xhr.responseText);
+        };
+        xhr.send(null);
+      }
+
+      function xhrPost(url, body, done) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", url, true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.timeout = 10000;
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState === 4) {
+            try {
+              done(JSON.parse(xhr.responseText));
+            } catch (e) {
+              done(null);
+            }
+          }
+        };
+        xhr.send(JSON.stringify(body));
+      }
+
+      function renderServerPills() {
+        var html = "";
+        for (var i = 0; i < SERVERS.length; i++) {
+          html += '<span class="server-pill">' + esc(fixSpaces(SERVERS[i].name)) + "</span>";
+          html += '<span class="muted" style="font-size:11px; margin-right:8px;">' + esc(SERVERS[i].base) + "</span>";
+        }
+        byId("serverPills").innerHTML = html;
+      }
+
+      function renderNoScanningState() {
+        allJobs = [];
+        doneKeys = {};
+        lastJobKeys = null;
+        byId("statTotal").innerHTML = "0";
+        byId("statSingle").innerHTML = "0";
+        byId("statMulti").innerHTML = "0";
+        byId("statDomains").innerHTML = "0";
+        byId("statReserved").innerHTML = "—/—";
+        byId("jobsGroupedWrap").innerHTML = '<div class="empty-state">No scanning is ongoing.</div>';
+        byId("lastUpdated").innerHTML = "Updated " + new Date().toLocaleTimeString();
+        setAutoRefreshRate(IDLE_REFRESH_MS, "Idle");
+      }
+
+      function fetchAllServers() {
+        pendingFetches = SERVERS.length;
+        fetchedServers = {};
+
+        if (!SERVERS.length) {
+          renderNoScanningState();
+          return;
+        }
+
+        for (var i = 0; i < SERVERS.length; i++) {
+          (function(srv) {
+            xhrGetJson(srv.base + "/jobs", function(data) {
+              fetchedServers[srv.name] = { ok: true, data: data, server: srv };
+              pendingFetches--;
+              if (pendingFetches <= 0) mergeAndRender();
+            }, function() {
+              fetchedServers[srv.name] = { ok: false, server: srv };
+              pendingFetches--;
+              if (pendingFetches <= 0) mergeAndRender();
+            });
+          })(SERVERS[i]);
+        }
+      }
+
+      function setAutoRefreshRate(ms, label) {
+        if (refreshTimer) clearInterval(refreshTimer);
+        refreshTimer = setInterval(function() {
+          fetchAllServers();
+        }, ms);
+
+        var indicator = byId("refreshIndicator");
+        if (indicator) {
+          indicator.innerHTML = '<span class="refresh-dot"></span>' + label + " (" + (ms / 1000) + "s)";
+        }
+      }
+
+      function getVisibleJobRowCount() {
+        return document.querySelectorAll(".job-row[id^='row-']").length;
+      }
+
+      function mergeAndRender() {
+        var merged = [];
+        var okCount = 0;
+
+        for (var i = 0; i < SERVERS.length; i++) {
+          var srv = SERVERS[i];
+          var res = fetchedServers[srv.name];
+          if (!res || !res.ok) continue;
+
+          okCount++;
+          var jobs = (res.data && res.data.jobs) ? res.data.jobs : [];
+          for (var j = 0; j < jobs.length; j++) {
+            var copy = {};
+            for (var k in jobs[j]) {
+              if (jobs[j].hasOwnProperty(k)) copy[k] = jobs[j][k];
+            }
+            copy._server = srv.name;
+            copy._serverBase = srv.base;
+            copy._reserved = res.data.reserved_domains;
+            copy._max = res.data.max_reserved_domains;
+            merged.push(copy);
+          }
+        }
+
+        merged = merged.filter(function(j) { return !doneKeys[jobKey(j)]; });
+
+        if (okCount === 0) {
+          byId("lastUpdated").innerHTML = "Updated " + new Date().toLocaleTimeString();
+          return;
+        }
+
+        if (merged.length === 0) {
+          if (emptyClearTimer) clearTimeout(emptyClearTimer);
+
+          if (getVisibleJobRowCount() > 0) {
+            emptyClearTimer = setTimeout(function() {
+              renderNoScanningState();
+            }, EMPTY_CLEAR_DELAY_MS);
+          } else {
+            renderNoScanningState();
+          }
+
+          byId("lastUpdated").innerHTML = "Updated " + new Date().toLocaleTimeString();
+          return;
+        }
+
+        if (emptyClearTimer) {
+          clearTimeout(emptyClearTimer);
+          emptyClearTimer = null;
+        }
+
+        var newKeyStr = merged.map(jobKey).sort().join("|");
+
+        allJobs = merged;
+        updateStats();
+        setAutoRefreshRate(ACTIVE_REFRESH_MS, "Live");
+
+        if (newKeyStr !== lastJobKeys) {
+          lastJobKeys = newKeyStr;
+          renderGroupedServers();
+        } else {
+          for (var x = 0; x < allJobs.length; x++) {
+            fetchProgress(allJobs[x]);
+          }
+        }
+
+        byId("lastUpdated").innerHTML = "Updated " + new Date().toLocaleTimeString();
+      }
+
+      function updateStats() {
+        var singles = 0;
+        var multis = 0;
+        var domainCount = 0;
+        var reserved = "—";
+        var maxR = "—";
+
+        for (var i = 0; i < allJobs.length; i++) {
+          var j = allJobs[i];
+          if (j.type === "single") {
+            singles++;
+            domainCount++;
+          } else if (j.type === "multi") {
+            multis++;
+            if (j.domains && j.domains.length) domainCount += j.domains.length;
+            else if (j.domain) domainCount++;
+          }
+        }
+
+        if (allJobs.length > 0) {
+          reserved = typeof allJobs[0]._reserved !== "undefined" ? allJobs[0]._reserved : "—";
+          maxR = typeof allJobs[0]._max !== "undefined" ? allJobs[0]._max : "—";
+        }
+
+        byId("statTotal").innerHTML = allJobs.length;
+        byId("statSingle").innerHTML = singles;
+        byId("statMulti").innerHTML = multis;
+        byId("statDomains").innerHTML = domainCount;
+        byId("statReserved").innerHTML = reserved + "/" + maxR;
+      }
+
+      function groupJobsByServer() {
+        var grouped = {};
+        for (var i = 0; i < SERVERS.length; i++) {
+          grouped[SERVERS[i].name] = [];
+        }
+        for (var j = 0; j < allJobs.length; j++) {
+          var job = allJobs[j];
+          if (!grouped[job._server]) grouped[job._server] = [];
+          grouped[job._server].push(job);
+        }
+        return grouped;
+      }
+
+      function renderGroupedServers() {
+        var wrap = byId("jobsGroupedWrap");
+        var grouped = groupJobsByServer();
+        var anyJobs = false;
+        var html = '<div class="jobs-wrap">';
+
+        for (var i = 0; i < SERVERS.length; i++) {
+          var srv = SERVERS[i];
+          var jobs = grouped[srv.name] || [];
+          if (jobs.length) anyJobs = true;
+
+          html += '<div class="server-block">';
+          html += '<div class="server-header">';
+          html += '<div class="server-title">' + esc(fixSpaces(srv.name)) + '</div>';
+          html += '<div class="server-meta">' + esc(srv.base) + ' • ' + jobs.length + ' job(s)</div>';
+          html += '</div>';
+
+          if (!jobs.length) {
+            html += '<div class="job-row"><span class="muted">No scanning is ongoing.</span></div>';
+          } else {
+            html += '<div class="server-jobs">';
+            for (var j = 0; j < jobs.length; j++) {
+              html += renderJobRow(jobs[j]);
+            }
+            html += '</div>';
+          }
+
+          html += '</div>';
+        }
+
+        html += "</div>";
+
+        if (!anyJobs) {
+          wrap.innerHTML = '<div class="empty-state">No scanning is ongoing.</div>';
+          return;
+        }
+
+        wrap.innerHTML = html;
+
+        for (var x = 0; x < allJobs.length; x++) {
+          fetchProgress(allJobs[x]);
+        }
+      }
+
+      function renderJobRow(j) {
+        var key = jobKey(j);
+        var isMulti = j.type === "multi";
+        var batchId = j.batchId || "";
+        var jobId = j.jobId || "";
+        var viewUrl = isMulti
+          ? j._serverBase + "/tester-multi?batch_id=" + encodeURIComponent(batchId)
+          : j._serverBase + "/tester?domain=" + encodeURIComponent(j.domain || "") + "&job_id=" + encodeURIComponent(jobId);
+
+        var stopAttr = isMulti
+          ? 'onclick="stopJob(\'multi\',\'' + esc(key) + '\',\'' + esc(batchId) + '\',\'' + esc(j._serverBase) + '\')"'
+          : 'onclick="stopJob(\'single\',\'' + esc(key) + '\',\'' + esc(j.domain || "") + '\',\'' + esc(j._serverBase) + '\')"';
+
+        var logAttr = 'onclick="toggleLog(\'' + esc(key) + '\',\'' + esc(isMulti ? batchId : jobId) + '\',\'' + esc(j._serverBase) + '\',' + (isMulti ? "true" : "false") + ')"';
+
+        var toolsHtml = (j.tools && j.tools.length) ? esc(j.tools.join(", ")) : "—";
+        var domainLabel = isMulti ? ("Batch " + esc(batchId || "—")) : esc(j.domain || "—");
+
+        var html = "";
+        html += '<div class="job-row" id="row-' + esc(key) + '">';
+        html += '<div class="job-main">';
+
+        html += "<div>";
+        html += '<div class="job-domain">';
+        html += '<span class="type-badge ' + (isMulti ? "type-multi" : "type-single") + '">' + (isMulti ? "multi" : "single") + "</span>";
+        html += '<span class="domain-text">' + domainLabel + "</span>";
+        html += '<span class="status-badge status-idle" id="status-' + esc(key) + '">Waiting...</span>';
+        html += "</div>";
+
+        if (isMulti && j.domains && j.domains.length) {
+          html += '<div class="domain-rows" id="domain-rows-' + esc(key) + '">';
+          for (var i = 0; i < j.domains.length; i++) {
+            html += '<div class="domain-row-item" id="drow-' + esc(key) + '-' + i + '">';
+            html += '<span class="domain-dot" style="background:#ccc;"></span>';
+            html += '<span class="domain-row-name">' + esc(j.domains[i]) + '</span>';
+            html += '<span class="domain-row-status">queued</span>';
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+
+        html += '<div class="tools-line">Tools: ' + toolsHtml + "</div>";
+        html += "</div>";
+
+        html += '<div class="pb-wrap">';
+        html += '<div class="pb-track"><div class="pb-fill" id="fill-' + esc(key) + '" style="width:0%"></div></div>';
+        html += '<div class="pb-text" id="pt-' + esc(key) + '">—</div>';
+        html += "</div>";
+
+        html += '<div class="job-meta">';
+        html += '<div id="elapsed-' + esc(key) + '" data-started="' + esc(j.startedAt || "") + '">Started: ' + esc(elapsed(j.startedAt)) + "</div>";
+        html += '<div>ID: <code style="font-size:10px;">' + esc((isMulti ? batchId : jobId) || "—") + "</code></div>";
+        html += "</div>";
+
+        // html += '<div class="job-actions">';
+        // html += '<a class="view-link" href="' + esc(viewUrl) + '" target="_blank">View →</a>';
+        // html += '<button class="btn" style="height:24px;padding:0 8px;font-size:10px;" ' + logAttr + '>Log</button>';
+        // html += '<button class="btn btn-red" style="height:24px;padding:0 8px;font-size:10px;" ' + stopAttr + '>Stop</button>';
+        // html += "</div>";
+
+        html += "</div>";
+
+        html += '<div class="log-row" id="logrow-' + esc(key) + '">';
+        html += '<div class="log-box" id="logbox-' + esc(key) + '">(click Log to load)</div>';
+        html += "</div>";
+
+        html += "</div>";
+
+        return html;
+      }
+
+      // ── Done detection & animated row removal ────────────────────────────
+      var DONE_SHOW_MS = 3500; // show green "Done" for this long before fading
+
+      function markJobDone(key, j) {
+        if (doneKeys[key]) return;
+        doneKeys[key] = true;
+
+        var fill  = byId("fill-"   + key);
+        var badge = byId("status-" + key);
+        var pt    = byId("pt-"     + key);
+        var row   = byId("row-"    + key);
+
+        if (fill)  { fill.classList.remove("indeterminate"); fill.className = "pb-fill done"; fill.style.width = "100%"; }
+        if (badge) { badge.textContent = "Done ✓"; badge.className = "status-badge status-done"; }
+        if (pt)    { pt.textContent = "Completed"; }
+
+        var metaDiv = row && row.querySelector(".job-meta div:first-child");
+        if (metaDiv) metaDiv.style.color = "#28a745";
+
+        setTimeout(function() {
+          if (!row) {
+            if (getVisibleJobRowCount() === 0) renderNoScanningState();
+            return;
+          }
+
+          row.style.transition = "opacity 1s ease, max-height 0.8s ease";
+          row.style.opacity = "0";
+          row.style.overflow = "hidden";
+
+          setTimeout(function() {
+            if (row.parentNode) row.parentNode.removeChild(row);
+            allJobs = allJobs.filter(function(jb) { return jobKey(jb) !== key; });
+            updateStats();
+
+            if (getVisibleJobRowCount() === 0) {
+              renderNoScanningState();
+            }
+          }, 1000);
+        }, DONE_SHOW_MS);
+      }
+
+      function fetchProgress(j) {
+        var key = jobKey(j);
+        if (doneKeys[key]) return; // already done, skip
+
+        var isMulti = j.type === "multi";
+        var url = isMulti
+          ? j._serverBase + "/multi-progress?batch_id=" + encodeURIComponent(j.batchId || "")
+          : j._serverBase + "/progress?job_id=" + encodeURIComponent(j.jobId || "");
+
+        xhrGetJson(url, function(data) {
+          if (doneKeys[key]) return; // may have resolved while XHR was in flight
+
+          var p = data.progress || {};
+          var completed = parseInt(p.completed || "0", 10);
+          var total = parseInt(p.total || "0", 10);
+          var pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+          var status = p.status || "";
+          var isDone = status.toUpperCase().indexOf("DONE") === 0;
+          var statusUpper = String(status || "").toUpperCase();
+          var isChecking =
+            statusUpper.indexOf("CHECKING") >= 0 ||
+            statusUpper.indexOf("STARTING") >= 0 ||
+            statusUpper.indexOf("QUEUED") >= 0;
+
+          var fill = byId("fill-" + key);
+          var pt = byId("pt-" + key);
+          var badge = byId("status-" + key);
+
+          if (fill) {
+            fill.className = isDone ? "pb-fill done" : "pb-fill";
+
+            if (!isDone && isChecking && completed === 0) {
+              fill.classList.add("indeterminate");
+              fill.style.width = "";
+            } else if (!isDone && pct === 0) {
+              fill.style.width = "6%";
+            } else {
+              fill.style.width = pct + "%";
+            }
+          }
+
+          if (pt) {
+            pt.innerHTML = completed + "/" + total + " — " + esc(status || "…");
+          }
+
+          if (badge) {
+            badge.innerHTML = esc(status || "Running");
+            badge.className = "status-badge " + (isDone ? "status-done" : "status-running");
+          }
+
+          if (isMulti && j.domains && j.domains.length) {
+            var completedDomains = data.completed_domains || [];
+            var failedDomains = data.failed_domains || [];
+            var lastDomain = p.last_domain || "";
+
+            for (var di = 0; di < j.domains.length; di++) {
+              var d = j.domains[di];
+              var rowEl = byId("drow-" + key + "-" + di);
+              if (!rowEl) continue;
+
+              var isDomDone   = completedDomains.indexOf(d) >= 0;
+              var isDomFail   = failedDomains.indexOf(d) >= 0;
+              var isDomRun    = !isDomDone && !isDomFail && d === lastDomain && !isDone;
+
+              var dotColor    = isDomDone ? "#28a745" : isDomFail ? "#dc3545" : isDomRun ? "#185fa5" : "#ccc";
+              var statusLabel = isDomDone ? "done"    : isDomFail ? "failed"  : isDomRun ? "running" : "queued";
+              var cssClass    = isDomDone ? "is-done" : isDomFail ? "is-failed" : isDomRun ? "is-running" : "";
+
+              rowEl.className = "domain-row-item " + cssClass;
+              var dotEl = rowEl.querySelector(".domain-dot");
+              var statusEl = rowEl.querySelector(".domain-row-status");
+              if (dotEl) dotEl.style.background = dotColor;
+              if (statusEl) statusEl.textContent = statusLabel;
+            }
+          }
+
+          if (openLogs[key]) {
+            fetchLog(key, isMulti ? (j.batchId || "") : (j.jobId || ""), j._serverBase, isMulti);
+          }
+
+          // ── Reliable done detection via dedicated endpoints ───────────────
+          if (isDone) {
+            markJobDone(key, j);
+            return;
+          }
+
+          if (!isMulti) {
+            // For single jobs: confirm done via /done flag file (most reliable)
+            var doneUrl = j._serverBase + "/done?job_id=" + encodeURIComponent(j.jobId || "");
+            xhrGetJson(doneUrl, function(doneData) {
+              if (doneData && (doneData.done === true || doneData.done === "true" || doneData.done === 1)) {
+                markJobDone(key, j);
+              }
+            });
+          } else {
+            // For multi jobs: confirm done via /multi-status (running: false)
+            var msUrl = j._serverBase + "/multi-status?batch_id=" + encodeURIComponent(j.batchId || "");
+            xhrGetJson(msUrl, function(msData) {
+              if (msData && msData.running === false) {
+                markJobDone(key, j);
+              }
+            });
+          }
+        });
+      }
+
+      window.toggleLog = function(key, id, serverBase, isMulti) {
+        var row = byId("logrow-" + key);
+        if (!row) return;
+
+        if (openLogs[key]) {
+          openLogs[key] = false;
+          row.style.display = "none";
+        } else {
+          openLogs[key] = true;
+          row.style.display = "block";
+          fetchLog(key, id, serverBase, isMulti);
+        }
+      };
+
+      function fetchLog(key, id, serverBase, isMulti) {
+        var url = isMulti
+          ? serverBase + "/multi-log?batch_id=" + encodeURIComponent(id)
+          : serverBase + "/log?job_id=" + encodeURIComponent(id);
+
+        xhrGetText(url, function(text) {
+          var box = byId("logbox-" + key);
+          if (!box) return;
+          var lines = text.split("\n");
+          if (lines.length > 60) lines = lines.slice(lines.length - 60);
+          box.textContent = lines.join("\n") || "(no output yet)";
+          box.scrollTop = box.scrollHeight;
+        });
+      }
+
+      window.stopJob = function(type, key, idOrDomain, serverBase) {
+        if (!confirm("Stop this job?\n\n" + idOrDomain)) return;
+
+        var url = serverBase + (type === "multi" ? "/stop-multi" : "/stop");
+        var body = type === "multi" ? { batch_id: idOrDomain } : { domain: idOrDomain };
+
+        xhrPost(url, body, function(data) {
+          if (data && data.ok) {
+            setTimeout(function() { refreshAll(); }, 1200);
+          } else {
+            alert("Failed to stop job: " + (data && data.error ? data.error : "Unknown error"));
+          }
+        });
+      };
+
+      window.refreshAll = function() {
+        fetchAllServers();
+      };
+
+      function startAutoRefresh() {
+        setAutoRefreshRate(IDLE_REFRESH_MS, "Idle");
+      }
+
+      function fixSpaces(str) {
+        return String(str).replace(/%20/g, ' ');
+      }
+
+      // Live elapsed time ticker — updates every second for running jobs
+      function tickElapsed() {
+        var elems = document.querySelectorAll("[id^='elapsed-']");
+        for (var i = 0; i < elems.length; i++) {
+          var el = elems[i];
+          var key = el.id.replace("elapsed-", "");
+          if (doneKeys[key]) continue; // frozen — job is done
+          var started = el.getAttribute("data-started");
+          if (started) el.textContent = "Started: " + elapsed(started);
+        }
+      }
+
+      window.onload = function() {
+        renderServerPills();
+        fetchAllServers();
+        startAutoRefresh();
+        setInterval(tickElapsed, 1000);
+      };
+    })();
+    </script>
+  </body>
+</html>
