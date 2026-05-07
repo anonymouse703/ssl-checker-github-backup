@@ -9,6 +9,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const crypto = require("crypto");
 const { initPool, poolStats } = require("./utils/browser-pool");
+const { getUsage, recordScan, minutesUntilNextAllowed } = require("./utils/scan-usage");
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -193,7 +194,7 @@ function batchMetaPath(batchId) {
   return path.join(API_BATCH_DIR, `${batchId}.json`);
 }
 
-// ── Domain lock helpers (check-only) ─────────────────────────────────────────
+// ── Domain lock helpers ───────────────────────────────────────────────────────
 
 function releaseDomainLock(domain, pid) {
   const lockFile = domainLockPath(domain);
@@ -630,7 +631,7 @@ async function handleRequest(req, res) {
     return res.end();
   }
 
-  // Health
+  // ── GET /health ────────────────────────────────────────────────────────────
   if (method === "GET" && url.pathname === "/health") {
     return jsonResponse(res, 200, {
       ok: true,
@@ -643,7 +644,189 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Single scan
+  // ── POST /scan-capacity ────────────────────────────────────────────────────
+  //
+  // Called by FileMaker "Server Scan - Check Capacity" before every scan.
+  // Validates the five scan_settings fields from the Server Settings record.
+  //
+  // Request body:
+  //   {
+  //     "domain_count":  1,
+  //     "mode":          "single" | "multi",
+  //     "scan_settings": {
+  //       "scan_enabled":      1,
+  //       "max_concurrent":    2,
+  //       "minutes_gap":       20,
+  //       "domains_per_hour":  3,
+  //       "domains_per_day":   72,
+  //       "scan_notes":        ""
+  //     }
+  //   }
+  //
+  // FileMaker reads: ok, error, active_slots, usage.hour_count, usage.day_count
+
+  if (method === "POST" && url.pathname === "/scan-capacity") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const domainCount    = Math.max(1, parseInt(parsed.domain_count, 10) || 1);
+    const mode           = String(parsed.mode || "single");
+    const ss             = parsed.scan_settings || {};
+
+    // Parse every setting — default to 0 (disabled) when missing
+    const scanEnabled    = parseInt(ss.scan_enabled,     10);   // 1 = enabled
+    const maxConcurrent  = parseInt(ss.max_concurrent,   10) || 0;
+    const minutesGap     = parseFloat(ss.minutes_gap)    || 0;
+    const domainsPerHour = parseInt(ss.domains_per_hour, 10) || 0;
+    const domainsPerDay  = parseInt(ss.domains_per_day,  10) || 0;
+
+    const usage       = getUsage();
+    const activeSlots = currentReservedDomainCount();
+
+    // Shared blocked-response builder
+    function blocked(msg, extra = {}) {
+      return jsonResponse(res, 200, {
+        ok: 0,
+        error: msg,
+        active_slots: activeSlots,
+        usage: {
+          hour_count:   usage.hour_count,
+          day_count:    usage.day_count,
+          last_scan_at: usage.last_scan_at,
+        },
+        ...extra,
+      });
+    }
+
+    // 1. Scan enabled
+    if (scanEnabled !== 1) {
+      return blocked("Scanning is currently disabled on this server.");
+    }
+
+    // 2. Minutes gap — need last_scan_at to enforce this
+    const minsRemaining = minutesUntilNextAllowed(minutesGap, usage.last_scan_at);
+    if (minsRemaining > 0) {
+      const nextAvailableSlot = new Date(Date.now() + (minsRemaining * 60000)).toISOString();
+
+      return blocked(
+        `Please wait ${minsRemaining} more minute(s) before starting another scan. ` +
+        `Minimum gap between scans: ${minutesGap} minute(s).`,
+        {
+          minutes_remaining: minsRemaining,
+          estimated_wait_minutes: minsRemaining,
+          next_available_slot: nextAvailableSlot,
+          minutes_gap: minutesGap
+        }
+      );
+    }
+
+    // 3–5. Compute partial allowed_count for throttle limits.
+    //
+    // minutes_gap (check 2 above) is a HARD BLOCK — if that server is within
+    // its gap window it returns ok:0 immediately and FileMaker overflows to
+    // the next server.  That is intentional: the gap is per-server pacing, so
+    // a server in cooldown should not accept any new domains.
+    //
+    // max_concurrent / domains_per_hour / domains_per_day are SOFT limits —
+    // the server may be able to accept SOME of the requested domains even if
+    // it cannot accept all.  We calculate the maximum each constraint allows
+    // and return the minimum as allowed_count.  FileMaker slices the batch
+    // accordingly and sends the remainder to overflow servers.
+
+    // How many slots each limit still has room for (0 limit = unlimited):
+    const allowedByConcurrent = maxConcurrent > 0
+      ? Math.max(0, maxConcurrent - activeSlots)
+      : domainCount;                                   // no limit → accept all
+
+    const allowedByHour = domainsPerHour > 0
+      ? Math.max(0, domainsPerHour - usage.hour_count)
+      : domainCount;
+
+    const allowedByDay = domainsPerDay > 0
+      ? Math.max(0, domainsPerDay - usage.day_count)
+      : domainCount;
+
+    // Tightest constraint wins, but never more than what was requested:
+    const allowedCount = Math.min(domainCount, allowedByConcurrent, allowedByHour, allowedByDay);
+
+    if (allowedCount === 0) {
+      // Truly full — report the binding constraint
+      let reason = 'Server is currently at full capacity.';
+      if (allowedByConcurrent === 0 && maxConcurrent > 0) {
+        reason =
+          `Max concurrent scans reached (${activeSlots} active, ` +
+          `limit is ${maxConcurrent}). Please wait for running scans to finish.`;
+      } else if (allowedByHour === 0 && domainsPerHour > 0) {
+        let hourlyMinutesRemaining = 60;
+
+        if (usage.hour_window_start) {
+          const hourStartMs = new Date(usage.hour_window_start).getTime();
+          const resetMs = hourStartMs + (60 * 60 * 1000);
+          hourlyMinutesRemaining = Math.max(1, Math.ceil((resetMs - Date.now()) / 60000));
+        }
+
+        const nextAvailableSlot = new Date(Date.now() + (hourlyMinutesRemaining * 60000)).toISOString();
+
+        reason =
+          `Hourly domain limit reached: ${usage.hour_count} of ${domainsPerHour} used ` +
+          `this hour. Please wait ${hourlyMinutesRemaining} more minute(s).`;
+
+        return blocked(reason, {
+          allowed_count: 0,
+          max_concurrent: maxConcurrent,
+          minutes_gap: minutesGap,
+          domains_per_hour: domainsPerHour,
+          domains_per_day: domainsPerDay,
+          minutes_remaining: hourlyMinutesRemaining,
+          estimated_wait_minutes: hourlyMinutesRemaining,
+          next_available_slot: nextAvailableSlot
+        });
+      } else if (allowedByDay === 0 && domainsPerDay > 0) {
+        reason =
+          `Daily domain limit reached: ${usage.day_count} of ${domainsPerDay} used today. ` +
+          `No more domains allowed until midnight.`;
+      }
+      return blocked(reason, {
+        allowed_count:      0,
+        max_concurrent:     maxConcurrent,
+        domains_per_hour:   domainsPerHour,
+        domains_per_day:    domainsPerDay,
+      });
+    }
+
+    // Partial or full acceptance — always include allowed_count so FileMaker
+    // knows exactly how many domains to send to this server vs overflow.
+    const capacityNote =
+      (maxConcurrent  > 0 ? ` concurrent=${activeSlots}/${maxConcurrent}`          : '') +
+      (domainsPerHour > 0 ? ` hour=${usage.hour_count}/${domainsPerHour}`           : '') +
+      (domainsPerDay  > 0 ? ` day=${usage.day_count}/${domainsPerDay}`              : '');
+
+    console.log(
+      `[scan-capacity] OK — mode=${mode} requested=${domainCount} ` +
+      `allowed=${allowedCount}${capacityNote}`
+    );
+
+    return jsonResponse(res, 200, {
+      ok:            1,
+      allowed_count: allowedCount,      // ← FileMaker reads this to slice the batch
+      active_slots:  activeSlots,
+      domain_count:  domainCount,
+      mode,
+      usage: {
+        hour_count:        usage.hour_count,
+        day_count:         usage.day_count,
+        last_scan_at:      usage.last_scan_at,
+        hour_window_start: usage.hour_window_start,
+        day_date:          usage.day_date,
+      },
+    });
+  }
+
+  // ── POST /scan ─────────────────────────────────────────────────────────────
 
   if (method === "POST" && url.pathname === "/scan") {
     let parsed;
@@ -720,7 +903,7 @@ async function handleRequest(req, res) {
       `[api] Starting single scan for ${domain} with job_id=${jobId}${forceRescan ? " (force_rescan)" : ""}`
     );
 
-    // Always clear any stale lock file before spawning the child.
+    // Always clear any stale lock file before spawning the child
     try {
       const lockFile = domainLockPath(domain);
       if (fs.existsSync(lockFile)) {
@@ -772,6 +955,9 @@ async function handleRequest(req, res) {
       activeJobs.delete(jobKey);
     });
 
+    // Record usage against hourly/daily counters
+    recordScan(1);
+
     return jsonResponse(res, 200, {
       ok: true,
       queued: true,
@@ -786,7 +972,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Batch scan
+  // ── POST /multi-scan ───────────────────────────────────────────────────────
+
   if (method === "POST" && url.pathname === "/multi-scan") {
     let parsed;
     try {
@@ -895,6 +1082,9 @@ async function handleRequest(req, res) {
       saveBatchMeta(saved);
     });
 
+    // Record all domains in this batch against hourly/daily counters
+    recordScan(domains.length);
+
     return jsonResponse(res, 200, {
       ok: true,
       queued: true,
@@ -912,7 +1102,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Single progress
+  // ── GET /progress ──────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/progress") {
     const jobId = (url.searchParams.get("job_id") || "").trim();
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
@@ -941,7 +1132,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Batch progress
+  // ── GET /multi-progress ────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/multi-progress") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
     if (!batchId) {
@@ -955,7 +1147,6 @@ async function handleRequest(req, res) {
       return jsonResponse(res, 404, { ok: false, error: "Batch not found" });
     }
 
-    // ── Parse per-domain lists written by multi-audit.js ─────────────────────
     const completedDomains = (progress && progress.completed_domains)
       ? progress.completed_domains.split(",").filter(Boolean)
       : [];
@@ -973,7 +1164,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Single result
+  // ── GET /result ────────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/result") {
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
     const jobId = (url.searchParams.get("job_id") || "").trim();
@@ -1026,7 +1218,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Batch result
+  // ── GET /multi-result ──────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/multi-result") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
     if (!batchId) {
@@ -1084,7 +1277,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Single stop
+  // ── POST /stop ─────────────────────────────────────────────────────────────
+
   if (method === "POST" && url.pathname === "/stop") {
     let parsed;
     try {
@@ -1132,7 +1326,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Batch stop
+  // ── POST /stop-multi ───────────────────────────────────────────────────────
+
   if (method === "POST" && url.pathname === "/stop-multi") {
     let parsed;
     try {
@@ -1172,7 +1367,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Single status
+  // ── GET /status ────────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/status") {
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
     const jobId = (url.searchParams.get("job_id") || "").trim();
@@ -1207,7 +1403,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Batch status
+  // ── GET /multi-status ──────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/multi-status") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
     if (!batchId) {
@@ -1234,7 +1431,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Batch log
+  // ── GET /multi-log ─────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/multi-log") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
     if (!batchId) {
@@ -1249,7 +1447,8 @@ async function handleRequest(req, res) {
     return res.end(log);
   }
 
-  // Done check
+  // ── GET /done ──────────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/done") {
     const jobId = (url.searchParams.get("job_id") || "").trim();
     if (!jobId) {
@@ -1260,7 +1459,8 @@ async function handleRequest(req, res) {
     return jsonResponse(res, 200, { ok: true, done: isDone });
   }
 
-  // Single log
+  // ── GET /log ───────────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/log") {
     const jobId = (url.searchParams.get("job_id") || "").trim();
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
@@ -1284,7 +1484,8 @@ async function handleRequest(req, res) {
     return res.end(log);
   }
 
-  // Serve tester HTML files
+  // ── GET /tester ────────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/tester") {
     try {
       const html = fs.readFileSync(path.join(TOOL_DIR, "api-tester.html"), "utf8");
@@ -1324,7 +1525,7 @@ async function handleRequest(req, res) {
     }
   }
 
-  //format local ymd
+  // ── Date/folder helpers (used by cleanup endpoints) ───────────────────────
 
   function formatLocalYmd(dateObj) {
     return (
@@ -1352,7 +1553,8 @@ async function handleRequest(req, res) {
     return folderDate === formatLocalYmd(new Date());
   }
 
-  // Cleanup API helper files
+  // ── GET /cleanup-api-files ─────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/cleanup-api-files") {
     const hours = parseInt(url.searchParams.get("hours") || "24", 10);
 
@@ -1378,7 +1580,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Cleanup stale jobs
+  // ── DELETE /jobs/stale ─────────────────────────────────────────────────────
+
   if ((method === "DELETE" || method === "GET") && url.pathname === "/jobs/stale") {
     const hours = parseFloat(url.searchParams.get("hours") || "2");
     if (isNaN(hours) || hours <= 0) {
@@ -1397,7 +1600,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // List all jobs — includes domains array for multi jobs
+  // ── GET /jobs ──────────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/jobs") {
     return jsonResponse(res, 200, {
       ok: true,
@@ -1418,7 +1622,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Cleanup old batch folders (keep latest X days)
+  // ── GET /cleanup-batches ───────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/cleanup-batches") {
     const days = parseInt(url.searchParams.get("days") || "7", 10);
 
@@ -1486,7 +1691,8 @@ async function handleRequest(req, res) {
     });
   }
 
-  // Latest results - CSV or JSON
+  // ── GET /latest ────────────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/latest") {
     const format = url.searchParams.get("format") || "json";
     const latestCsv = path.join(OUTPUT_DIR, "latest.csv");
@@ -1518,7 +1724,8 @@ async function handleRequest(req, res) {
     }
   }
 
-  // Get specific domain from latest
+  // ── GET /latest/domain ─────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/latest/domain") {
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
     if (!domain) {
@@ -1528,7 +1735,7 @@ async function handleRequest(req, res) {
     try {
       const { getDomainFromLatest } = require('./utils/latest-results');
       const data = getDomainFromLatest(domain);
-      
+
       if (data) {
         return jsonResponse(res, 200, { ok: true, data });
       } else {
@@ -1539,15 +1746,16 @@ async function handleRequest(req, res) {
     }
   }
 
-  // Get stats from latest
+  // ── GET /latest/stats ──────────────────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/latest/stats") {
     try {
       const { getAllLatestDomains } = require('./utils/latest-results');
       const allDomains = getAllLatestDomains();
-      
+
       const stats = {
         total_domains: allDomains.length,
-        last_updated: allDomains.length > 0 ? 
+        last_updated: allDomains.length > 0 ?
           allDomains.reduce((latest, d) => {
             const date = new Date(d.Run_At);
             return date > latest ? date : latest;
@@ -1560,10 +1768,10 @@ async function handleRequest(req, res) {
       for (const domain of allDomains) {
         const sslGrade = domain.SSL_Grade || "N/A";
         stats.ssl_grade_distribution[sslGrade] = (stats.ssl_grade_distribution[sslGrade] || 0) + 1;
-        
+
         const pagespeedPerf = domain.PageSpeed_Performance || "N/A";
         stats.pagespeed_performance_distribution[pagespeedPerf] = (stats.pagespeed_performance_distribution[pagespeedPerf] || 0) + 1;
-        
+
         const sucuriStatus = domain.Sucuri_Overall || "N/A";
         stats.sucuri_status_distribution[sucuriStatus] = (stats.sucuri_status_distribution[sucuriStatus] || 0) + 1;
       }
@@ -1574,7 +1782,8 @@ async function handleRequest(req, res) {
     }
   }
 
-  // Cleanup old scan folders (backward compatibility)
+  // ── GET /cleanup (backward compat) ────────────────────────────────────────
+
   if (method === "GET" && url.pathname === "/cleanup") {
     const days = parseInt(url.searchParams.get("days") || "7", 10);
 
@@ -1640,6 +1849,8 @@ async function handleRequest(req, res) {
       days,
     });
   }
+
+  // ── 404 catch-all ─────────────────────────────────────────────────────────
 
   return jsonResponse(res, 404, {
     ok: false,
