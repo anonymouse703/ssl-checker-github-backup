@@ -1,0 +1,1266 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>SSL Checker — Domains Monitor</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 14px;
+        background: #f3f3f3;
+        color: #222;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+      }
+      .page-title {
+        font-size: 16px;
+        font-weight: bold;
+        margin: 0 0 10px 0;
+      }a
+      .panel {
+        background: #fff;
+        border: 1px solid #d8d8d8;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
+      }
+      .top-bar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: space-between;
+      }
+      .top-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .server-pill {
+        display: inline-block;
+        padding: 3px 12px;
+        background: #f0faf4;
+        color: #1f8b3a;
+        border-radius: 14px;
+        font-weight: bold;
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: middle;
+      }
+      .muted { color: #666; font-size: 12px; }
+      .btn {
+        height: 28px;
+        padding: 0 14px;
+        border-radius: 7px;
+        border: 1px solid #ccc;
+        background: #f7f7f7;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .btn:hover { background: #eee; }
+      .btn-blue {
+        background: #185fa5;
+        color: #fff;
+        border-color: #185fa5;
+      }
+      .btn-blue:hover { background: #1470b8; }
+      .stats-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .stat-box {
+        background: #f8f9fc;
+        padding: 10px 16px;
+        border-radius: 10px;
+        text-align: center;
+        flex: 1;
+        min-width: 90px;
+        border: 1px solid #e5e5e5;
+      }
+      .stat-number {
+        font-size: 22px;
+        font-weight: bold;
+        color: #185fa5;
+      }
+      .stat-label {
+        font-size: 11px;
+        color: #777;
+        margin-top: 2px;
+      }
+      .refresh-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #28a745;
+        margin-right: 5px;
+        vertical-align: middle;
+      }
+      .last-updated { font-size: 11px; color: #888; }
+      .servers-wrap { display: block; }
+      .server-card {
+        border: 1px solid #e3e3e3;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #fff;
+        margin-bottom: 14px;
+      }
+      .server-header {
+        background: #f4f8f5;
+        border-bottom: 1px solid #e3e3e3;
+        padding: 10px 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .server-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: #1f8b3a;
+      }
+      .server-meta { font-size: 11px; color: #777; }
+      .mini-stats {
+        padding: 8px 14px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        border-bottom: 1px solid #f0f0f0;
+        background: #fcfcfc;
+      }
+      .mini-pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 10px;
+        font-weight: 700;
+        background: #eee;
+        color: #555;
+      }
+      .pill-done { background: #e9f7ee; color: #1a6e31; }
+      .pill-running { background: #e8f1fb; color: #185fa5; }
+      .pill-queued { background: #f1f1f1; color: #666; }
+      .pill-failed { background: #fdecee; color: #b02030; }
+      .domain-list { max-height: 520px; overflow: auto; }
+      .domain-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+      .domain-table th {
+        padding: 6px 8px;
+        border-top: 1px solid #f0f0f0;
+        border-bottom: 1px solid #e8e8e8;
+        background: #fafafa;
+        color: #666;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+        text-align: left;
+      }
+      .domain-table th.right { text-align: right; }
+      .domain-table td {
+        padding: 7px 8px;
+        border-bottom: 1px solid #f2f2f2;
+        vertical-align: middle;
+      }
+      .dot-col { width: 18px; }
+      .time-col { width: 112px; }
+      .status-col { width: 95px; }
+      .type-col { width: 72px; }
+      .domain-dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #ccc;
+      }
+      .domain-name {
+        font-size: 12px;
+        font-weight: 600;
+        color: #333;
+        word-break: break-word;
+      }
+      .domain-process-time {
+        font-size: 10px;
+        color: #777;
+        text-align: right;
+        white-space: nowrap;
+      }
+      .domain-status {
+        font-size: 10px;
+        font-weight: 700;
+        text-align: right;
+        white-space: nowrap;
+      }
+      .domain-source {
+        font-size: 10px;
+        color: #888;
+        text-align: right;
+        white-space: nowrap;
+      }
+      .is-done .domain-dot { background: #28a745; }
+      .is-done .domain-name, .is-done .domain-status, .is-done .domain-process-time { color: #1a6e31; }
+      .is-running .domain-dot { background: #185fa5; }
+      .is-running .domain-name, .is-running .domain-status, .is-running .domain-process-time { color: #185fa5; }
+      .is-queued .domain-dot { background: #aaa; }
+      .is-queued .domain-name, .is-queued .domain-status { color: #666; }
+      .is-failed .domain-dot { background: #dc3545; }
+      .is-failed .domain-name, .is-failed .domain-status, .is-failed .domain-process-time { color: #b02030; }
+      .empty-state {
+        text-align: center;
+        padding: 28px;
+        color: #aaa;
+      }
+      .small-note {
+        color: #777;
+        font-size: 11px;
+        margin-top: 8px;
+        line-height: 1.4;
+      }
+      @media (max-width: 720px) {
+        body { padding: 8px; font-size: 12px; }
+        .panel { padding: 10px; }
+        .server-header { padding: 8px 10px; }
+        .mini-stats { padding: 8px 10px; }
+        .domain-table th, .domain-table td { padding: 5px 4px; }
+        .dot-col { width: 14px; }
+        .time-col { width: 82px; }
+        .status-col { width: 72px; }
+        .type-col { width: 54px; }
+        .domain-name { font-size: 11px; }
+        .domain-process-time, .domain-status, .domain-source { font-size: 9px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page-title">🌐 Domains Scan Monitor</div>
+
+    <div class="panel" style="padding:10px 18px; margin-bottom:12px;">
+      <div class="top-bar">
+        <div class="top-left">
+          <span class="muted">Servers:</span>
+          <span id="serverPills"></span>
+          <span id="refreshIndicator" style="margin-left:6px; font-size:11px; color:#666;">
+            <span class="refresh-dot"></span>Idle
+          </span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span class="last-updated muted" id="lastUpdated"></span>
+          <button class="btn" id="failedLogsBtn" style="display:none;" onclick="downloadFailedLogs()">⬇ Failed Logs TXT</button>
+          <button class="btn btn-blue" onclick="refreshAll()">↺ Refresh Now</button>
+        </div>
+      </div>
+      <div class="small-note">
+        Server cards stay visible by default. When batch_ids is supplied, this monitor shows only the current FileMaker scan batches and ignores old queued batches left on the Node servers.
+      </div>
+    </div>
+
+    <div class="panel" id="statsPanel">
+      <div class="stats-row">
+        <div class="stat-box"><div class="stat-number" id="statServers">0</div><div class="stat-label">Scanning Servers</div></div>
+        <div class="stat-box"><div class="stat-number" id="statDomains">0</div><div class="stat-label">Unique Domains</div></div>
+        <div class="stat-box"><div class="stat-number" id="statScanned" style="color:#1a6e31;">0/0</div><div class="stat-label">Domains Scanned</div></div>
+        <div class="stat-box"><div class="stat-number" id="statRunning" style="color:#185fa5;">0</div><div class="stat-label">Scanning</div></div>
+        <div class="stat-box"><div class="stat-number" id="statQueued" style="color:#666;">0</div><div class="stat-label">Queued</div></div>
+        <div class="stat-box"><div class="stat-number" id="statFailed" style="color:#b02030;">0</div><div class="stat-label">Failed</div></div>
+        <div class="stat-box"><div class="stat-number" id="statDone" style="color:#1a6e31;">0</div><div class="stat-label">Done</div></div>
+      </div>
+    </div>
+
+    <div class="panel" id="domainsPanel">
+      <div class="section-title" style="font-size:14px;font-weight:bold;margin:0 0 10px 0;">Domains by Server</div>
+      <div id="serversWrap"></div>
+    </div>
+
+    <script>
+    (function() {
+      var ACTIVE_REFRESH_MS = 2500;
+      var IDLE_REFRESH_MS = 10000;
+      var HANDOFF_KEEP_MS = 15000;
+      var EMPTY_CLEAR_AFTER_POLLS = 3;
+      var TERMINAL_CLEAR_AFTER_POLLS = 2;
+      var OLD_MONITOR_CACHE_KEYS = [
+        "domainsMonitorLastRowsV3",
+        "domainsMonitorLastRowsV4",
+        "domainsMonitorLastRowsV5"
+      ];
+
+      var refreshTimer = null;
+      var currentRefreshMs = 0;
+      var lastRenderSignature = "";
+      var fetchedServers = {};
+      var pendingFetches = 0;
+      var currentRowsByServer = {};
+      var lastRowsByServer = {};
+      var domainProcessTimeByKey = {};
+      var emptyJobsPollCount = 0;
+      var terminalPollCount = 0;
+      var failedLogCountByServer = {};
+      var persistentFailedLogCount = 0;
+
+      function byId(id) { return document.getElementById(id); }
+
+      function safeDecodeRepeated(value) {
+        var out = String(value || "").replace(/\+/g, " ");
+        for (var i = 0; i < 5; i++) {
+          try {
+            var decoded = decodeURIComponent(out);
+            if (decoded === out) break;
+            out = decoded;
+          } catch (e) {
+            break;
+          }
+        }
+        return out;
+      }
+
+      function getParam(name) {
+        var qs = window.location.search.substring(1);
+        if (!qs) return "";
+        var parts = qs.split("&");
+        for (var i = 0; i < parts.length; i++) {
+          var pair = parts[i].split("=");
+          if (safeDecodeRepeated(pair[0] || "") === name) {
+            return safeDecodeRepeated(pair.slice(1).join("=") || "");
+          }
+        }
+        return "";
+      }
+
+      function parseServers() {
+        var raw = safeDecodeRepeated(getParam("servers"));
+        if (raw) {
+          var arr = raw.split(",");
+          var out = [];
+          for (var i = 0; i < arr.length; i++) {
+            var s = safeDecodeRepeated(arr[i]).replace(/^\s+|\s+$/g, "");
+            if (!s) continue;
+            var parts = s.split("|");
+            var name = safeDecodeRepeated(parts[0] || s).replace(/^\s+|\s+$/g, "");
+            var base = safeDecodeRepeated(parts[1] || parts[0] || "").replace(/^\s+|\s+$/g, "");
+            if (base.charAt(base.length - 1) === "/") base = base.substring(0, base.length - 1);
+            if (base) out.push({ name: name || base, base: base });
+          }
+          return out;
+        }
+        var host = getParam("host") || getParam("server_host") || window.location.hostname;
+        var port = getParam("port") || "3000";
+        var name = getParam("server_name") || host;
+        return [{ name: name, base: "http://" + host + ":" + port }];
+      }
+
+      var SERVERS = parseServers();
+
+      function parseBatchIds() {
+        var raw = safeDecodeRepeated(getParam("batch_ids") || getParam("batch_id") || "");
+        if (!raw) return [];
+        var parts = raw.split(/[,\n\r\s]+/);
+        var out = [];
+        var seen = {};
+        for (var i = 0; i < parts.length; i++) {
+          var id = safeDecodeRepeated(parts[i]).replace(/^\s+|\s+$/g, "");
+          if (!id) continue;
+          if (!/^[A-Za-z0-9_-]+$/.test(id)) continue;
+          if (!seen[id]) {
+            seen[id] = true;
+            out.push(id);
+          }
+        }
+        return out;
+      }
+
+      var BATCH_FILTER = parseBatchIds();
+
+      function batchFilterQuery() {
+        return BATCH_FILTER.length ? "batch_ids=" + encodeURIComponent(BATCH_FILTER.join(",")) : "";
+      }
+
+      function jobMatchesBatchFilter(job) {
+        if (!BATCH_FILTER.length) return true;
+        var id = String((job && (job.batchId || job.batch_id || job.jobId || job.job_id)) || "");
+        for (var i = 0; i < BATCH_FILTER.length; i++) {
+          if (id === BATCH_FILTER[i]) return true;
+        }
+        return false;
+      }
+
+      function esc(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function fixSpaces(str) {
+        return String(str || "").replace(/%20/g, " ");
+      }
+
+      function makeNoCacheUrl(url) {
+        var sep = url.indexOf("?") >= 0 ? "&" : "?";
+        return url + sep + "_ts=" + encodeURIComponent(Date.now());
+      }
+
+      function xhrGetJson(url, okFn, errFn) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", makeNoCacheUrl(url), true);
+        xhr.timeout = 8000;
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          try {
+            if (xhr.status >= 200 && xhr.status < 300) okFn(JSON.parse(xhr.responseText));
+            else if (errFn) errFn(xhr.status);
+          } catch (e) {
+            if (errFn) errFn(e);
+          }
+        };
+        xhr.ontimeout = function() { if (errFn) errFn("timeout"); };
+        xhr.send(null);
+      }
+
+      function xhrGetText(url, okFn, errFn) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", makeNoCacheUrl(url), true);
+        xhr.timeout = 12000;
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          if (xhr.status >= 200 && xhr.status < 300) okFn(xhr.responseText || "");
+          else if (errFn) errFn(xhr.status);
+        };
+        xhr.ontimeout = function() { if (errFn) errFn("timeout"); };
+        xhr.send(null);
+      }
+
+      function clearOldBrowserCache() {
+        try {
+          for (var i = 0; i < OLD_MONITOR_CACHE_KEYS.length; i++) {
+            window.localStorage.removeItem(OLD_MONITOR_CACHE_KEYS[i]);
+          }
+        } catch (e) {}
+      }
+
+      function setAutoRefreshRate(ms, label) {
+        if (currentRefreshMs !== ms) {
+          if (refreshTimer) clearInterval(refreshTimer);
+          refreshTimer = setInterval(fetchAllServers, ms);
+          currentRefreshMs = ms;
+        }
+        var indicator = byId("refreshIndicator");
+        if (indicator) indicator.innerHTML = '<span class="refresh-dot"></span>' + esc(label) + " (" + (ms / 1000) + "s)";
+      }
+
+      function renderServerPills() {
+        var html = "";
+        for (var i = 0; i < SERVERS.length; i++) {
+          html += '<span class="server-pill" title="' + esc(SERVERS[i].base) + '">' + esc(fixSpaces(SERVERS[i].name)) + "</span>";
+        }
+        if (BATCH_FILTER.length) {
+          html += '<span class="muted" title="' + esc(BATCH_FILTER.join(", ")) + '">Current batches: ' + esc(BATCH_FILTER.length) + '</span>';
+        }
+        byId("serverPills").innerHTML = html || '<span class="muted">No servers configured</span>';
+      }
+
+      function normalizeStatus(status) {
+        var raw = String(status || "").toLowerCase();
+        var s = raw.replace(/^\s+|\s+$/g, "");
+        if (s.indexOf("done") === 0 || s === "complete" || s === "completed" || s === "success") return "done";
+        if (s.indexOf("failed") === 0 || s.indexOf("error") === 0 || s.indexOf("dead") === 0) return "failed";
+        if (s.indexOf("finalizing") === 0 || s.indexOf("result row not ready") >= 0 || s.indexOf("waiting for result") >= 0) return "processing";
+        if (
+          s === "processing" ||
+          s === "running" ||
+          s === "checking" ||
+          s === "starting" ||
+          s === "scanning" ||
+          s === "uploading" ||
+          s.indexOf("processing") === 0 ||
+          s.indexOf("running") === 0 ||
+          s.indexOf("checking") === 0 ||
+          s.indexOf("starting") === 0 ||
+          s.indexOf("scanning") === 0 ||
+          s.indexOf("uploading") === 0
+        ) return "processing";
+        if (s.indexOf("waiting_gap") === 0 || s.indexOf("waiting gap") === 0 || s.indexOf("queued") === 0) return "queued";
+        return "queued";
+      }
+
+      function rowClass(status) {
+        var s = normalizeStatus(status);
+        if (s === "done") return "is-done";
+        if (s === "failed") return "is-failed";
+        if (s === "processing") return "is-running";
+        return "is-queued";
+      }
+
+      function displayStatus(status) {
+        var s = normalizeStatus(status);
+        if (s === "processing") return "scanning";
+        return s;
+      }
+
+      function statusRank(status) {
+        var s = normalizeStatus(status);
+        if (s === "processing") return 1;
+        if (s === "queued") return 2;
+        if (s === "failed") return 3;
+        if (s === "done") return 4;
+        return 9;
+      }
+
+      function formatDurationMs(ms) {
+        ms = Math.max(0, parseInt(ms || 0, 10));
+        var totalSeconds = Math.floor(ms / 1000);
+        if (totalSeconds < 60) return totalSeconds + "s";
+        var minutes = Math.floor(totalSeconds / 60);
+        var seconds = totalSeconds % 60;
+        if (minutes < 60) return minutes + "m " + seconds + "s";
+        var hours = Math.floor(minutes / 60);
+        minutes = minutes % 60;
+        return hours + "h " + minutes + "m";
+      }
+
+      function numericProcessMs(item) {
+        if (!item) return null;
+        var keys = ["process_time_ms", "processMs", "duration_ms", "durationMs", "elapsed_ms", "elapsedMs"];
+        for (var i = 0; i < keys.length; i++) {
+          if (typeof item[keys[i]] !== "undefined" && item[keys[i]] !== null && item[keys[i]] !== "") {
+            var n = parseInt(item[keys[i]], 10);
+            if (!isNaN(n)) return n;
+          }
+        }
+        return null;
+      }
+
+      function textProcessTime(item) {
+        if (!item) return "";
+        var keys = ["process_time", "processTime", "duration", "elapsed"];
+        for (var i = 0; i < keys.length; i++) {
+          if (typeof item[keys[i]] !== "undefined" && item[keys[i]] !== null && item[keys[i]] !== "") {
+            return String(item[keys[i]]);
+          }
+        }
+        return "";
+      }
+
+      function firstDateMs(item, keys) {
+        if (!item) return null;
+        for (var i = 0; i < keys.length; i++) {
+          if (item[keys[i]]) {
+            var t = new Date(item[keys[i]]).getTime();
+            if (!isNaN(t)) return t;
+          }
+        }
+        return null;
+      }
+
+      function processTimeKey(serverName, source, id, domain) {
+        return String(serverName || "") + "::" + String(source || "") + "::" + String(id || "") + "::" + String(domain || "");
+      }
+
+      function buildProcessTime(serverName, source, id, domain, status, statusItem) {
+        var normalized = normalizeStatus(status);
+        var key = processTimeKey(serverName, source, id, domain);
+        var now = Date.now();
+        var rec = domainProcessTimeByKey[key] || {};
+        var item = statusItem || {};
+
+        var apiMs = numericProcessMs(item);
+        var apiText = textProcessTime(item);
+        var apiStarted = firstDateMs(item, ["started_at", "startedAt", "scan_started_at", "scanStartedAt"]);
+        var apiFinished = firstDateMs(item, ["finished_at", "finishedAt", "scan_finished_at", "scanFinishedAt"]);
+
+        if (apiStarted !== null) rec.startedMs = apiStarted;
+        if (apiFinished !== null) rec.endedMs = apiFinished;
+
+        var display = "—";
+
+        if (normalized === "processing") {
+          if (!rec.startedMs) rec.startedMs = now;
+          rec.endedMs = null;
+          if (apiMs !== null) display = formatDurationMs(apiMs);
+          else if (apiText) display = apiText;
+          else display = formatDurationMs(now - rec.startedMs);
+        } else if (normalized === "done" || normalized === "failed") {
+          if (apiMs !== null) display = formatDurationMs(apiMs);
+          else if (apiText) display = apiText;
+          else if (rec.startedMs) {
+            if (!rec.endedMs) rec.endedMs = now;
+            display = formatDurationMs(rec.endedMs - rec.startedMs);
+          }
+        }
+
+        domainProcessTimeByKey[key] = rec;
+        return display;
+      }
+
+      function domainListForJob(job) {
+        if (job && job.domain_statuses && job.domain_statuses.length) {
+          var out = [];
+          for (var i = 0; i < job.domain_statuses.length; i++) {
+            if (job.domain_statuses[i] && job.domain_statuses[i].domain) out.push(job.domain_statuses[i].domain);
+          }
+          return out;
+        }
+        return (job && job.domains && job.domains.length) ? job.domains : [];
+      }
+
+      function domainStatusMap(items) {
+        var map = {};
+        items = items || [];
+        for (var i = 0; i < items.length; i++) {
+          if (items[i] && items[i].domain) map[items[i].domain] = normalizeStatus(items[i].status || "queued");
+        }
+        return map;
+      }
+
+      function domainStatusItemMap(items) {
+        var map = {};
+        items = items || [];
+        for (var i = 0; i < items.length; i++) {
+          if (items[i] && items[i].domain) map[items[i].domain] = items[i];
+        }
+        return map;
+      }
+
+      function prepareCurrentRows() {
+        currentRowsByServer = {};
+        for (var i = 0; i < SERVERS.length; i++) currentRowsByServer[SERVERS[i].name] = [];
+      }
+
+      function fetchAllServers() {
+        pendingFetches = SERVERS.length;
+        fetchedServers = {};
+        prepareCurrentRows();
+
+        if (!SERVERS.length) {
+          renderAll("Idle");
+          return;
+        }
+
+        for (var i = 0; i < SERVERS.length; i++) {
+          (function(srv) {
+            var jobsUrl = srv.base + "/jobs";
+            var filterQs = batchFilterQuery();
+            if (filterQs) jobsUrl += "?" + filterQs;
+            xhrGetJson(jobsUrl, function(data) {
+              fetchedServers[srv.name] = { ok: true, data: data, server: srv };
+              pendingFetches--;
+              if (pendingFetches <= 0) fetchProgressForAllJobs();
+            }, function() {
+              fetchedServers[srv.name] = { ok: false, data: null, server: srv };
+              pendingFetches--;
+              if (pendingFetches <= 0) fetchProgressForAllJobs();
+            });
+          })(SERVERS[i]);
+        }
+      }
+
+      function fetchProgressForAllJobs() {
+        var jobs = [];
+        for (var i = 0; i < SERVERS.length; i++) {
+          var srv = SERVERS[i];
+          var res = fetchedServers[srv.name];
+          if (!res || !res.ok) continue;
+          var serverJobs = (res.data && res.data.jobs) ? res.data.jobs : [];
+          for (var j = 0; j < serverJobs.length; j++) {
+            if (!jobMatchesBatchFilter(serverJobs[j])) continue;
+            var copy = {};
+            for (var k in serverJobs[j]) {
+              if (serverJobs[j].hasOwnProperty(k)) copy[k] = serverJobs[j][k];
+            }
+            copy._server = srv.name;
+            copy._serverBase = srv.base;
+            jobs.push(copy);
+          }
+        }
+
+        if (!jobs.length) {
+          handleNoJobsFound();
+          return;
+        }
+
+        emptyJobsPollCount = 0;
+
+        var remaining = jobs.length;
+        for (var x = 0; x < jobs.length; x++) {
+          (function(job) {
+            if (job.type === "multi") fetchMultiJob(job, doneOne);
+            else fetchSingleJob(job, doneOne);
+          })(jobs[x]);
+        }
+
+        function doneOne() {
+          remaining--;
+          if (remaining > 0) return;
+
+          if (currentRowsAreAllTerminal()) {
+            terminalPollCount++;
+            if (terminalPollCount >= TERMINAL_CLEAR_AFTER_POLLS) {
+              clearDomainRowsOnly();
+              renderAll("Idle");
+              setAutoRefreshRate(IDLE_REFRESH_MS, "Idle");
+              return;
+            }
+
+            saveMemoryRows();
+            renderAll("Finishing");
+            setAutoRefreshRate(ACTIVE_REFRESH_MS, "Finishing");
+            return;
+          }
+
+          terminalPollCount = 0;
+          saveMemoryRows();
+          renderAll("Live");
+          setAutoRefreshRate(ACTIVE_REFRESH_MS, "Live");
+        }
+      }
+
+      function fetchMultiJob(job, done) {
+        var url = job._serverBase + "/multi-progress?batch_id=" + encodeURIComponent(job.batchId || "");
+        xhrGetJson(url, function(data) {
+          addMultiRows(job, data || {});
+          done();
+        }, function() {
+          addMultiRows(job, {});
+          done();
+        });
+      }
+
+      function addMultiRows(job, data) {
+        var serverName = job._server;
+        if (!currentRowsByServer[serverName]) currentRowsByServer[serverName] = [];
+
+        var p = data.progress || {};
+        var domains = [];
+        if (data.domains && data.domains.length) domains = data.domains;
+        else domains = domainListForJob(job);
+
+        var domainStatusItems = data.domain_statuses || job.domain_statuses || [];
+        var statusByDomain = domainStatusMap(domainStatusItems);
+        var statusItemByDomain = domainStatusItemMap(domainStatusItems);
+        var completed = data.completed_domains || [];
+        var failed = data.failed_domains || [];
+        var currentDomain = p.current_domain || job.current_domain || "";
+
+        for (var i = 0; i < domains.length; i++) {
+          var d = domains[i];
+          var st = statusByDomain[d] || "queued";
+          if (!statusByDomain[d]) {
+            if (completed.indexOf(d) >= 0) st = "done";
+            else if (failed.indexOf(d) >= 0) st = "failed";
+            else if (d === currentDomain) st = "processing";
+          }
+
+          var statusItem = statusItemByDomain[d] || { domain: d, status: st };
+
+          currentRowsByServer[serverName].push({
+            domain: d,
+            status: normalizeStatus(st),
+            process_time: buildProcessTime(serverName, "multi", job.batchId || "", d, st, statusItem),
+            source: "multi",
+            id: job.batchId || "",
+            sort: i,
+            updatedAt: Date.now()
+          });
+        }
+      }
+
+      function fetchSingleJob(job, done) {
+        var url = job._serverBase + "/progress?job_id=" + encodeURIComponent(job.jobId || "");
+        xhrGetJson(url, function(data) {
+          var p = data.progress || {};
+          var status = normalizeStatus(p.status || job.status || "processing");
+          if (String(p.status || "").toUpperCase().indexOf("DONE") === 0) status = "done";
+          addSingleRow(job, status, p);
+          done();
+        }, function() {
+          addSingleRow(job, normalizeStatus(job.status || "processing"), {});
+          done();
+        });
+      }
+
+      function addSingleRow(job, status, statusItem) {
+        var serverName = job._server;
+        if (!currentRowsByServer[serverName]) currentRowsByServer[serverName] = [];
+        var domainName = job.domain || (statusItem && statusItem.domain) || "—";
+        currentRowsByServer[serverName].push({
+          domain: domainName,
+          status: normalizeStatus(status),
+          process_time: buildProcessTime(serverName, "single", job.jobId || "", domainName, status, statusItem || {}),
+          source: "single",
+          id: job.jobId || "",
+          sort: 0,
+          updatedAt: Date.now()
+        });
+      }
+
+      function handleNoJobsFound() {
+        emptyJobsPollCount++;
+
+        pruneMemoryRows();
+
+        if (hasMemoryRows()) {
+          if (memoryRowsHaveActiveWork() && emptyJobsPollCount < EMPTY_CLEAR_AFTER_POLLS) {
+            renderAll("Checking API");
+            setAutoRefreshRate(ACTIVE_REFRESH_MS, "Checking API");
+            return;
+          }
+
+          if (memoryRowsAreAllTerminal() && emptyJobsPollCount < TERMINAL_CLEAR_AFTER_POLLS) {
+            renderAll("Finishing");
+            setAutoRefreshRate(ACTIVE_REFRESH_MS, "Finishing");
+            return;
+          }
+        }
+
+        clearDomainRowsOnly();
+        renderAll("Idle");
+        setAutoRefreshRate(IDLE_REFRESH_MS, "Idle");
+      }
+
+      function saveMemoryRows() {
+        var now = Date.now();
+        for (var i = 0; i < SERVERS.length; i++) {
+          var name = SERVERS[i].name;
+          var rows = currentRowsByServer[name] || [];
+          if (rows.length) lastRowsByServer[name] = { rows: rows, updatedAt: now };
+          else if (lastRowsByServer[name]) delete lastRowsByServer[name];
+        }
+      }
+
+      function pruneMemoryRows() {
+        var now = Date.now();
+        for (var name in lastRowsByServer) {
+          if (!lastRowsByServer.hasOwnProperty(name)) continue;
+          if (now - lastRowsByServer[name].updatedAt > HANDOFF_KEEP_MS) delete lastRowsByServer[name];
+        }
+      }
+
+      function clearDomainRowsOnly() {
+        prepareCurrentRows();
+        lastRowsByServer = {};
+        domainProcessTimeByKey = {};
+        emptyJobsPollCount = 0;
+        terminalPollCount = 0;
+        lastRenderSignature = "";
+        clearOldBrowserCache();
+      }
+
+      function hasMemoryRows() {
+        for (var name in lastRowsByServer) {
+          if (lastRowsByServer.hasOwnProperty(name) && lastRowsByServer[name] && lastRowsByServer[name].rows && lastRowsByServer[name].rows.length) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function memoryRowsHaveActiveWork() {
+        for (var name in lastRowsByServer) {
+          if (!lastRowsByServer.hasOwnProperty(name)) continue;
+          var rows = lastRowsByServer[name].rows || [];
+          for (var i = 0; i < rows.length; i++) {
+            var st = normalizeStatus(rows[i].status);
+            if (st === "processing" || st === "queued") return true;
+          }
+        }
+        return false;
+      }
+
+      function memoryRowsAreAllTerminal() {
+        var saw = false;
+        for (var name in lastRowsByServer) {
+          if (!lastRowsByServer.hasOwnProperty(name)) continue;
+          var rows = lastRowsByServer[name].rows || [];
+          for (var i = 0; i < rows.length; i++) {
+            saw = true;
+            var st = normalizeStatus(rows[i].status);
+            if (st !== "done" && st !== "failed") return false;
+          }
+        }
+        return saw;
+      }
+
+      function currentRowsAreAllTerminal() {
+        var saw = false;
+        for (var name in currentRowsByServer) {
+          if (!currentRowsByServer.hasOwnProperty(name)) continue;
+          var rows = currentRowsByServer[name] || [];
+          for (var i = 0; i < rows.length; i++) {
+            saw = true;
+            var st = normalizeStatus(rows[i].status);
+            if (st !== "done" && st !== "failed") return false;
+          }
+        }
+        return saw;
+      }
+
+      function currentRowsHaveActiveWork() {
+        for (var name in currentRowsByServer) {
+          if (!currentRowsByServer.hasOwnProperty(name)) continue;
+          var rows = currentRowsByServer[name] || [];
+          for (var i = 0; i < rows.length; i++) {
+            var st = normalizeStatus(rows[i].status);
+            if (st === "processing" || st === "queued") return true;
+          }
+        }
+        return false;
+      }
+
+      function rowsForServer(name) {
+        var rows = currentRowsByServer[name] || [];
+        if (rows.length) return dedupeRows(rows);
+        if (lastRowsByServer[name] && lastRowsByServer[name].rows) return dedupeRows(lastRowsByServer[name].rows);
+        return [];
+      }
+
+      function dedupeRows(rows) {
+        var map = {};
+        var order = [];
+        rows = rows || [];
+
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i] || {};
+          var key = String(r.domain || "").toLowerCase().replace(/^\s+|\s+$/g, "");
+          if (!key || key === "—") key = String(r.id || "row") + "_" + i;
+
+          if (!map[key]) {
+            map[key] = r;
+            order.push(key);
+            continue;
+          }
+
+          var oldRank = statusRank(map[key].status);
+          var newRank = statusRank(r.status);
+          if (newRank < oldRank) map[key] = r;
+        }
+
+        var out = [];
+        for (var j = 0; j < order.length; j++) out.push(map[order[j]]);
+        return out;
+      }
+
+      function countRows(rows) {
+        var counts = { total: rows.length, done: 0, processing: 0, queued: 0, failed: 0, scanned: 0 };
+        for (var i = 0; i < rows.length; i++) {
+          var s = normalizeStatus(rows[i].status);
+          if (s === "done") counts.done++;
+          else if (s === "failed") counts.failed++;
+          else if (s === "processing") counts.processing++;
+          else counts.queued++;
+        }
+        // Scanned means terminal from the scanner point of view.
+        // Both successful done rows and failed fallback rows should count as scanned.
+        counts.scanned = counts.done + counts.failed;
+        return counts;
+      }
+
+      // Global top stats should count each domain only once across all VMs.
+      // Per-server cards still show each VM's own queue.
+      function globalStatusWeight(status) {
+        var s = normalizeStatus(status);
+        if (s === "done") return 4;
+        if (s === "failed") return 3;
+        if (s === "processing") return 2;
+        return 1;
+      }
+
+      function dedupeRowsGlobal(rows) {
+        var map = {};
+        var order = [];
+        rows = rows || [];
+
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i] || {};
+          var key = String(r.domain || "").toLowerCase().replace(/^\s+|\s+$/g, "");
+          if (!key || key === "—") key = String(r.id || "row") + "_" + i;
+
+          if (!map[key]) {
+            map[key] = r;
+            order.push(key);
+            continue;
+          }
+
+          if (globalStatusWeight(r.status) > globalStatusWeight(map[key].status)) {
+            map[key] = r;
+          }
+        }
+
+        var out = [];
+        for (var j = 0; j < order.length; j++) out.push(map[order[j]]);
+        return out;
+      }
+
+      function renderAll(label) {
+        var activeServers = 0;
+        var totalDomains = 0;
+        var totalDone = 0;
+        var totalRunning = 0;
+        var totalQueued = 0;
+        var totalFailed = 0;
+        var allRowsForGlobalCounts = [];
+        var html = '<div class="servers-wrap">';
+        // Silent render signature: track rows/statuses, not ticking process-time text.
+        // This prevents a full table redraw every 2.5 seconds while a domain is still scanning.
+        var rowSignatureParts = [];
+
+        if (!SERVERS.length) {
+          html += '<div class="empty-state">No servers configured.</div>';
+        }
+
+        for (var i = 0; i < SERVERS.length; i++) {
+          var srv = SERVERS[i];
+          var rows = rowsForServer(srv.name);
+          rows.sort(function(a, b) {
+            var ra = statusRank(a.status);
+            var rb = statusRank(b.status);
+            if (ra !== rb) return ra - rb;
+            return String(a.domain || "").localeCompare(String(b.domain || ""));
+          });
+
+          var c = countRows(rows);
+          for (var globalI = 0; globalI < rows.length; globalI++) {
+            allRowsForGlobalCounts.push(rows[globalI]);
+          }
+
+          for (var sigI = 0; sigI < rows.length; sigI++) {
+            rowSignatureParts.push([
+              fixSpaces(srv.name),
+              rows[sigI].source || "",
+              rows[sigI].id || "",
+              String(rows[sigI].domain || "").toLowerCase(),
+              normalizeStatus(rows[sigI].status)
+            ].join("::"));
+          }
+
+          // Count only servers that currently have active scan work.
+          // Active = at least one processing/scanning row OR one queued row.
+          // Done-only / failed-only / idle servers are not counted here.
+          if (c.processing > 0 || c.queued > 0) activeServers++;
+
+          totalDomains += c.total;
+          totalDone += c.done;
+          totalRunning += c.processing;
+          totalQueued += c.queued;
+          totalFailed += c.failed;
+
+          html += '<div class="server-card">';
+          html += '<div class="server-header">';
+          html += '<div class="server-title">' + esc(fixSpaces(srv.name)) + '</div>';
+          html += '<div class="server-meta">' + c.scanned + '/' + c.total + ' scanned</div>';
+          html += '</div>';
+          html += '<div class="mini-stats">';
+          html += '<span class="mini-pill">Total ' + c.total + '</span>';
+          html += '<span class="mini-pill pill-done">Scanned ' + c.scanned + '/' + c.total + '</span>';
+          html += '<span class="mini-pill pill-running">Scanning ' + c.processing + '</span>';
+          html += '<span class="mini-pill pill-queued">Queued ' + c.queued + '</span>';
+          html += '<span class="mini-pill pill-failed">Failed ' + c.failed + '</span>';
+          html += '<span class="mini-pill pill-done">Done ' + c.done + '</span>';
+          html += '</div>';
+
+          if (!rows.length) {
+            html += '<div class="empty-state">No active scan. Waiting for live queue from API...</div>';
+          } else {
+            html += '<div class="domain-list">';
+            html += '<table class="domain-table">';
+            html += '<thead><tr><th class="dot-col"></th><th>Domain</th><th class="right time-col">Process Time</th><th class="right status-col">Status</th><th class="right type-col">Type</th></tr></thead>';
+            html += '<tbody>';
+            for (var r = 0; r < rows.length; r++) html += renderDomainRow(rows[r]);
+            html += '</tbody></table></div>';
+          }
+
+          html += '</div>';
+        }
+
+        html += '</div>';
+
+        var globalCounts = countRows(dedupeRowsGlobal(allRowsForGlobalCounts));
+
+        var signature = [
+          activeServers,
+          globalCounts.total,
+          globalCounts.done,
+          globalCounts.processing,
+          globalCounts.queued,
+          globalCounts.failed,
+          persistentFailedLogCount,
+          rowSignatureParts.join("||")
+        ].join("|");
+
+        if (signature !== lastRenderSignature) {
+          byId("serversWrap").innerHTML = html;
+          lastRenderSignature = signature;
+        }
+
+        byId("statServers").innerHTML = activeServers;
+        byId("statDomains").innerHTML = globalCounts.total;
+        byId("statScanned").innerHTML = globalCounts.scanned + "/" + globalCounts.total;
+        byId("statDone").innerHTML = globalCounts.done;
+        byId("statRunning").innerHTML = globalCounts.processing;
+        byId("statQueued").innerHTML = globalCounts.queued;
+        byId("statFailed").innerHTML = globalCounts.failed;
+        byId("lastUpdated").innerHTML = "Updated " + new Date().toLocaleTimeString();
+
+        var failedLogsBtn = byId("failedLogsBtn");
+        if (failedLogsBtn) {
+          var availableFailedLogs = Math.max(globalCounts.failed, persistentFailedLogCount || 0);
+          failedLogsBtn.style.display = availableFailedLogs > 0 ? "inline-block" : "none";
+          failedLogsBtn.innerHTML = availableFailedLogs > 0
+            ? "⬇ Failed Logs TXT (" + availableFailedLogs + ")"
+            : "⬇ Failed Logs TXT";
+        }
+
+        if (label) setAutoRefreshRate(label === "Idle" ? IDLE_REFRESH_MS : ACTIVE_REFRESH_MS, label);
+      }
+
+      function renderDomainRow(row) {
+        var st = normalizeStatus(row.status);
+        var html = "";
+        html += '<tr class="domain-row ' + rowClass(st) + '">';
+        html += '<td class="dot-col"><span class="domain-dot"></span></td>';
+        html += '<td class="domain-name">' + esc(row.domain || "—") + '</td>';
+        html += '<td class="domain-process-time time-col">' + esc(row.process_time || "—") + '</td>';
+        html += '<td class="domain-status status-col">' + esc(displayStatus(st)) + '</td>';
+        html += '<td class="domain-source type-col">' + esc(row.source || "") + '</td>';
+        html += '</tr>';
+        return html;
+      }
+
+      function csvCell(value) {
+        var s = String(value == null ? "" : value);
+        return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      }
+
+      function downloadTextFile(filename, text, mime) {
+        var blob = new Blob([text], { type: mime || "text/plain;charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function() {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 0);
+      }
+
+      function makeTimestampForFilename() {
+        return new Date().toISOString().replace(/[:.]/g, "-");
+      }
+
+      function fetchFailedLogSummaries(doneFn) {
+        var remaining = SERVERS.length;
+        var total = 0;
+        failedLogCountByServer = {};
+
+        if (!remaining) {
+          persistentFailedLogCount = 0;
+          if (doneFn) doneFn();
+          return;
+        }
+
+        for (var i = 0; i < SERVERS.length; i++) {
+          (function(srv) {
+            xhrGetJson(srv.base + "/failed-log-summary", function(data) {
+              var count = 0;
+              if (data && typeof data.count !== "undefined") {
+                count = parseInt(data.count, 10);
+                if (isNaN(count)) count = 0;
+              }
+              failedLogCountByServer[srv.name] = count;
+              total += count;
+              doneOne();
+            }, function() {
+              failedLogCountByServer[srv.name] = 0;
+              doneOne();
+            });
+          })(SERVERS[i]);
+        }
+
+        function doneOne() {
+          remaining--;
+          if (remaining <= 0) {
+            persistentFailedLogCount = total;
+            if (doneFn) doneFn();
+          }
+        }
+      }
+
+      function downloadFailedLogs() {
+        var rows = ["server,time,domain,reason,source,batch_id,job_id"];
+        var remaining = SERVERS.length;
+
+        if (!remaining) {
+          downloadTextFile("failed-scan-logs-" + makeTimestampForFilename() + ".csv", rows.join("\n") + "\n", "text/csv;charset=utf-8");
+          return;
+        }
+
+        for (var i = 0; i < SERVERS.length; i++) {
+          (function(srv) {
+            xhrGetText(srv.base + "/failed-log?format=csv", function(csv) {
+              addServerCsvRows(srv.name, csv);
+              done();
+            }, function(err) {
+              rows.push([
+                csvCell(fixSpaces(srv.name)),
+                csvCell(new Date().toISOString()),
+                csvCell(""),
+                csvCell("Could not download failed log from " + srv.base + " (" + err + ")"),
+                csvCell("monitor"),
+                csvCell(""),
+                csvCell("")
+              ].join(","));
+              done();
+            });
+          })(SERVERS[i]);
+        }
+
+        function addServerCsvRows(serverName, csv) {
+          var lines = String(csv || "").split(/\r?\n/);
+          for (var j = 0; j < lines.length; j++) {
+            var line = lines[j].trim();
+            if (!line) continue;
+            if (j === 0 && /^time,domain,reason,source,batch_id,job_id$/i.test(line)) continue;
+            rows.push(csvCell(fixSpaces(serverName)) + "," + line);
+          }
+        }
+
+        function done() {
+          remaining--;
+          if (remaining <= 0) {
+            downloadTextFile(
+              "failed-scan-logs-" + makeTimestampForFilename() + ".csv",
+              rows.join("\n") + "\n",
+              "text/csv;charset=utf-8"
+            );
+          }
+        }
+      }
+
+      window.refreshAll = function() {
+        lastRenderSignature = "";
+        fetchAllServers();
+      };
+      window.downloadFailedLogs = downloadFailedLogs;
+
+      window.onload = function() {
+        clearOldBrowserCache();
+        prepareCurrentRows();
+        renderServerPills();
+        renderAll("Idle");
+        fetchAllServers();
+      };
+    })();
+    </script>
+  </body>
+</html>

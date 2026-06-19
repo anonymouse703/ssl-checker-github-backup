@@ -1,0 +1,597 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Server Storage &amp; Memory Stats</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 14px;
+        background: #f3f3f3;
+        color: #222;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+      }
+
+      .page-title {
+        font-size: 16px;
+        font-weight: bold;
+        margin: 0 0 10px 0;
+      }
+
+      .top-bar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+
+      .top-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .muted { color: #666; font-size: 12px; }
+
+      .btn {
+        height: 28px;
+        padding: 0 14px;
+        border-radius: 7px;
+        border: 1px solid #ccc;
+        background: #f7f7f7;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .btn:hover { background: #eee; }
+      .btn-blue { background: #185fa5; color: #fff; border-color: #185fa5; }
+      .btn-blue:hover { background: #1470b8; }
+
+      .stats-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .stat-box {
+        background: #f8f9fc;
+        padding: 10px 16px;
+        border-radius: 10px;
+        text-align: center;
+        flex: 1;
+        min-width: 90px;
+        border: 1px solid #e5e5e5;
+      }
+
+      .stat-number {
+        font-size: 20px;
+        font-weight: bold;
+        color: #185fa5;
+      }
+      .stat-number.warn { color: #e07b00; }
+      .stat-number.danger { color: #dc3545; }
+
+      .stat-label {
+        font-size: 11px;
+        color: #777;
+        margin-top: 2px;
+      }
+
+      .disk-bar-wrap {
+        background: #e9ecef;
+        border-radius: 6px;
+        height: 14px;
+        overflow: hidden;
+        margin: 6px 0 3px 0;
+      }
+      .disk-bar-fill {
+        height: 100%;
+        border-radius: 6px;
+        background: #185fa5;
+        transition: width 0.5s;
+      }
+      .disk-bar-fill.warn  { background: #e07b00; }
+      .disk-bar-fill.danger { background: #dc3545; }
+
+      .servers-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 12px;
+      }
+
+      .server-card {
+        background: #fff;
+        border: 1px solid #d8d8d8;
+        border-radius: 10px;
+        padding: 14px 16px;
+      }
+
+      .server-card-title {
+        font-weight: bold;
+        font-size: 14px;
+        margin: 0 0 4px 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .server-card-host {
+        font-size: 11px;
+        color: #888;
+        margin-bottom: 10px;
+        word-break: break-all;
+      }
+
+      .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #ccc;
+      }
+      .dot.green  { background: #28a745; }
+      .dot.red    { background: #dc3545; }
+      .dot.orange { background: #e07b00; }
+
+      .kv-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+      .kv-table td { padding: 3px 0; font-size: 12px; }
+      .kv-table td:first-child { color: #666; width: 44%; }
+      .kv-table td:last-child  { font-weight: 600; text-align: right; }
+
+      .divider {
+        border: none;
+        border-top: 1px solid #eee;
+        margin: 8px 0;
+      }
+
+      .error-msg {
+        color: #dc3545;
+        font-size: 12px;
+        margin-top: 6px;
+        word-break: break-word;
+      }
+
+      .loading-msg {
+        color: #888;
+        font-size: 12px;
+        margin-top: 6px;
+      }
+
+      .refresh-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #28a745;
+        margin-right: 4px;
+        animation: pulse 1s infinite;
+        vertical-align: middle;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50%       { opacity: 0.3; }
+      }
+      .refresh-dot.idle { animation: none; background: #ccc; }
+
+      .uptime-badge {
+        display: inline-block;
+        background: #e8f5e9;
+        color: #2e7d32;
+        border-radius: 8px;
+        padding: 1px 8px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+
+      .section-title {
+        font-size: 12px;
+        font-weight: bold;
+        margin: 10px 0 5px 0;
+        color: #333;
+      }
+
+      .health-alerts {
+        background: #fff7e6;
+        border: 1px solid #ffd58a;
+        border-radius: 8px;
+        padding: 7px 9px;
+        margin: 8px 0;
+        color: #7a4b00;
+        font-size: 12px;
+      }
+
+      .health-alert {
+        margin: 2px 0;
+      }
+
+      .proc-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 5px;
+        font-size: 11px;
+      }
+      .proc-table th {
+        text-align: left;
+        color: #666;
+        font-weight: 600;
+        border-bottom: 1px solid #eee;
+        padding: 3px 2px;
+      }
+      .proc-table td {
+        border-bottom: 1px solid #f1f1f1;
+        padding: 3px 2px;
+        vertical-align: top;
+      }
+      .proc-table td.num {
+        text-align: right;
+        white-space: nowrap;
+      }
+      .cmd-cell {
+        word-break: break-word;
+        max-width: 180px;
+      }
+
+      .log-box {
+        background: #f8f8f8;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 7px 8px;
+        margin-top: 6px;
+        font-size: 11px;
+      }
+      .log-source {
+        font-weight: bold;
+        color: #444;
+        margin-bottom: 4px;
+        word-break: break-all;
+      }
+      .log-line {
+        color: #a40000;
+        margin: 2px 0;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+
+    <div class="top-bar">
+      <div class="top-left">
+        <span class="page-title">🖥️ Server CPU, Memory &amp; Disk</span>
+        <span id="refreshDot" class="refresh-dot idle"></span>
+        <span id="lastUpdated" class="muted">—</span>
+      </div>
+      <button class="btn btn-blue" onclick="fetchAll()">⟳ Refresh Now</button>
+    </div>
+
+    <div id="serversGrid" class="servers-grid">
+      <div class="loading-msg">Loading servers…</div>
+    </div>
+
+    <script>
+      function getParam(name) {
+        var qs = window.location.search.substring(1);
+        var parts = qs.split('&');
+        for (var i = 0; i < parts.length; i++) {
+          var pair = parts[i].split('=');
+          if (decodeURIComponent(pair[0]) === name) {
+            return pair.length > 1 ? decodeURIComponent(pair[1].replace(/\+/g, ' ')) : '';
+          }
+        }
+        return null;
+      }
+
+      var rawServers = getParam('servers') || '';
+      var autoRefreshSec = parseInt(getParam('refresh') || '30', 10);
+      if (!autoRefreshSec || autoRefreshSec < 5) autoRefreshSec = 30;
+      var refreshTimer = null;
+
+      function esc(value) {
+        return String(value == null ? '' : value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      function show(value) {
+        if (value === null || typeof value === 'undefined' || value === '') return '—';
+        return esc(value);
+      }
+
+      function twoDigit(n) {
+        n = parseInt(n, 10) || 0;
+        return n < 10 ? '0' + n : String(n);
+      }
+
+      function pctClass(pct) {
+        pct = parseInt(pct, 10) || 0;
+        if (pct >= 90) return 'danger';
+        if (pct >= 70) return 'warn';
+        return '';
+      }
+
+      function xhrJson(url, timeoutMs, callback) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.timeout = timeoutMs || 15000;
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          if (xhr.status < 200 || xhr.status >= 300) {
+            callback(new Error('HTTP ' + xhr.status + ': ' + xhr.responseText.substring(0, 200)));
+            return;
+          }
+          try {
+            callback(null, JSON.parse(xhr.responseText));
+          } catch (e) {
+            callback(new Error('Invalid JSON: ' + xhr.responseText.substring(0, 200)));
+          }
+        };
+        xhr.onerror = function() { callback(new Error('Network error')); };
+        xhr.ontimeout = function() { callback(new Error('Timeout')); };
+        xhr.send(null);
+      }
+
+      function shortText(value, maxLen) {
+        var s = String(value == null ? '' : value);
+        maxLen = maxLen || 120;
+        if (s.length > maxLen) return s.substring(0, maxLen - 1) + '…';
+        return s;
+      }
+
+      function renderAlerts(alerts) {
+        if (!alerts || !alerts.length) return '';
+        var html = '<div class="health-alerts">';
+        for (var i = 0; i < alerts.length; i++) {
+          html += '<div class="health-alert">⚠ ' + show(alerts[i]) + '</div>';
+        }
+        html += '</div>';
+        return html;
+      }
+
+      function renderProcessTable(title, rows) {
+        if (!rows || !rows.length) return '';
+        var html = '<div class="section-title">' + show(title) + '</div>' +
+          '<table class="proc-table">' +
+            '<tr>' +
+              '<th>PID</th>' +
+              '<th class="num">CPU</th>' +
+              '<th class="num">MEM</th>' +
+              '<th class="num">RSS</th>' +
+              '<th class="num">Age</th>' +
+              '<th>Command</th>' +
+            '</tr>';
+
+        for (var i = 0; i < rows.length && i < 6; i++) {
+          var p = rows[i] || {};
+          html += '<tr>' +
+            '<td>' + show(p.pid) + '</td>' +
+            '<td class="num">' + show(p.cpuPct) + '%</td>' +
+            '<td class="num">' + show(p.memPct) + '%</td>' +
+            '<td class="num">' + show(p.rssHuman) + '</td>' +
+            '<td class="num">' + show(p.elapsedHuman) + '</td>' +
+            '<td class="cmd-cell">' + show(shortText((p.command || '') + ' ' + (p.args || ''), 150)) + '</td>' +
+          '</tr>';
+        }
+        html += '</table>';
+        return html;
+      }
+
+      function renderActiveJobs(jobs) {
+        if (!jobs || !jobs.length) return '';
+        var html = '<div class="section-title">Active Job Details</div>' +
+          '<table class="proc-table">' +
+            '<tr><th>Type</th><th>Domain/Batch</th><th class="num">PID</th><th class="num">Age</th><th>Status</th></tr>';
+        for (var i = 0; i < jobs.length && i < 8; i++) {
+          var j = jobs[i] || {};
+          var label = j.domain || j.batchId || j.jobId || j.key || '—';
+          html += '<tr>' +
+            '<td>' + show(j.type) + '</td>' +
+            '<td class="cmd-cell">' + show(shortText(label, 80)) + '</td>' +
+            '<td class="num">' + show(j.pid) + '</td>' +
+            '<td class="num">' + show(j.ageHuman) + '</td>' +
+            '<td>' + show(shortText(j.status || j.lastDomain || '', 80)) + '</td>' +
+          '</tr>';
+        }
+        html += '</table>';
+        return html;
+      }
+
+      function renderLogs(groups) {
+        if (!groups || !groups.length) return '';
+        var html = '<div class="section-title">Recent Log Warnings / Errors</div>';
+        for (var i = 0; i < groups.length && i < 4; i++) {
+          var g = groups[i] || {};
+          html += '<div class="log-box">' +
+            '<div class="log-source">' + show(g.fileName || g.file || 'log') + '</div>';
+          var lines = g.lines || [];
+          for (var x = 0; x < lines.length && x < 6; x++) {
+            html += '<div class="log-line">' + show(shortText(lines[x], 220)) + '</div>';
+          }
+          html += '</div>';
+        }
+        return html;
+      }
+
+      function renderCard(result) {
+        var name = result.name || (result.srv && result.srv.name) || 'Server';
+        var base = result.base || (result.srv && result.srv.base) || '';
+        var id = 'card-' + String(name).replace(/\s+/g, '_');
+
+        if (!result.ok || !result.data || !result.data.ok) {
+          return '<div class="server-card" id="' + esc(id) + '">' +
+            '<div class="server-card-title"><span class="dot red"></span>' + show(name) + '</div>' +
+            '<div class="server-card-host">' + show(base) + '</div>' +
+            '<div class="error-msg">⚠ Cannot reach server' +
+              (result.error ? ': ' + show(result.error) : '') + '</div>' +
+          '</div>';
+        }
+
+        var d = result.data;
+        var disk = d.disk || {};
+        var mem = d.memory || {};
+        var sysMem = d.system_memory || {};
+        var cpu = d.system_cpu || {};
+        var swap = sysMem.swap || {};
+        var load = d.load || {};
+        var dirs = d.directories || {};
+        var pct = parseInt(disk.usedPct, 10) || 0;
+        var cls = pctClass(pct);
+        var memPct = parseInt(sysMem.usedPct || mem.systemUsedPct, 10) || 0;
+        var memCls = pctClass(memPct);
+        var cpuPct = parseInt(cpu.usedPct || load.cpuUsagePct, 10) || 0;
+        var cpuCls = pctClass(cpuPct);
+        var scanHuman = (dirs.scan_root || {}).human || '—';
+        var outputHuman = (dirs.output_dir || {}).human || '—';
+
+        return '<div class="server-card" id="' + esc(id) + '">' +
+          '<div class="server-card-title">' +
+            '<span class="dot green"></span>' + show(name) +
+            '&nbsp;<span class="uptime-badge">up ' + show(d.uptime_human) + '</span>' +
+          '</div>' +
+          '<div class="server-card-host">' + show(base) + ' · ' + show(result.ms) + 'ms</div>' +
+
+          renderAlerts(d.alerts) +
+
+          '<div style="font-size:11px;color:#666;margin-bottom:2px;">CPU Usage</div>' +
+          '<div class="disk-bar-wrap">' +
+            '<div class="disk-bar-fill ' + cpuCls + '" style="width:' + Math.min(cpuPct, 100) + '%"></div>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;font-size:11px;color:#555;">' +
+            '<span>Load ' + show(load.load1) + '</span>' +
+            '<span class="' + cpuCls + '" style="font-weight:bold;">' + cpuPct + '%</span>' +
+            '<span>' + show(cpu.cpuCount || load.cpuCount) + ' cores</span>' +
+          '</div>' +
+
+          '<div style="font-size:11px;color:#666;margin:9px 0 2px 0;">Memory Usage</div>' +
+          '<div class="disk-bar-wrap">' +
+            '<div class="disk-bar-fill ' + memCls + '" style="width:' + Math.min(memPct, 100) + '%"></div>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;font-size:11px;color:#555;">' +
+            '<span>' + show(sysMem.usedHuman || mem.systemUsed) + ' used</span>' +
+            '<span class="' + memCls + '" style="font-weight:bold;">' + memPct + '%</span>' +
+            '<span>' + show(sysMem.availableHuman || mem.systemAvailable) + ' available</span>' +
+          '</div>' +
+
+          '<div style="font-size:11px;color:#666;margin:9px 0 2px 0;">Disk Usage</div>' +
+          '<div class="disk-bar-wrap">' +
+            '<div class="disk-bar-fill ' + cls + '" style="width:' + Math.min(pct, 100) + '%"></div>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;font-size:11px;color:#555;">' +
+            '<span>' + show(disk.usedHuman) + ' used</span>' +
+            '<span class="' + cls + '" style="font-weight:bold;">' + pct + '%</span>' +
+            '<span>' + show(disk.availableHuman) + ' free</span>' +
+          '</div>' +
+
+          '<hr class="divider">' +
+
+          '<div class="stats-row" style="margin-bottom:10px;">' +
+            '<div class="stat-box">' +
+              '<div class="stat-number ' + cpuCls + '">' + cpuPct + '%</div>' +
+              '<div class="stat-label">CPU Usage</div>' +
+            '</div>' +
+            '<div class="stat-box">' +
+              '<div class="stat-number ' + memCls + '">' + show(sysMem.usedHuman || mem.systemUsed) + '</div>' +
+              '<div class="stat-label">Mem Used</div>' +
+            '</div>' +
+            '<div class="stat-box">' +
+              '<div class="stat-number">' + show(sysMem.totalHuman || mem.systemTotal) + '</div>' +
+              '<div class="stat-label">Mem Total</div>' +
+            '</div>' +
+            '<div class="stat-box">' +
+              '<div class="stat-number ' + cls + '">' + show(disk.usedHuman) + '</div>' +
+              '<div class="stat-label">Disk Used</div>' +
+            '</div>' +
+            '<div class="stat-box">' +
+              '<div class="stat-number">' + show(disk.totalHuman) + '</div>' +
+              '<div class="stat-label">Disk Total</div>' +
+            '</div>' +
+            '<div class="stat-box">' +
+              '<div class="stat-number">' + show(load.load1) + '</div>' +
+              '<div class="stat-label">Load 1m</div>' +
+            '</div>' +
+            '<div class="stat-box">' +
+              '<div class="stat-number">' + show(d.active_jobs) + '</div>' +
+              '<div class="stat-label">Active Jobs</div>' +
+            '</div>' +
+          '</div>' +
+
+          '<table class="kv-table">' +
+            '<tr><td>SCAN_ROOT size</td><td>' + show(scanHuman) + '</td></tr>' +
+            '<tr><td>OUTPUT_DIR size</td><td>' + show(outputHuman) + '</td></tr>' +
+            '<tr><td>Batch Folders</td><td>' + show(d.batch_folders) + '</td></tr>' +
+            '<tr><td>Domain Folders</td><td>' + show(d.domain_folders) + '</td></tr>' +
+            '<tr><td>CPU Usage</td><td>' + cpuPct + '%</td></tr>' +
+            '<tr><td>CPU Cores</td><td>' + show(cpu.cpuCount || load.cpuCount) + '</td></tr>' +
+            '<tr><td>Load Avg</td><td>' + show(load.load1) + ' / ' + show(load.load5) + ' / ' + show(load.load15) + '</td></tr>' +
+            '<tr><td>Swap Used</td><td>' + show(swap.usedHuman) + ' / ' + show(swap.totalHuman) + '</td></tr>' +
+            '<tr><td>Node.js Heap Used</td><td>' + show(mem.heapUsed) + '</td></tr>' +
+            '<tr><td>Node.js Heap Total</td><td>' + show(mem.heapTotal) + '</td></tr>' +
+            '<tr><td>Node.js RSS Memory</td><td>' + show(mem.rss) + '</td></tr>' +
+            '<tr><td>Node Version</td><td>' + show(d.node_version) + '</td></tr>' +
+          '</table>' +
+
+          renderActiveJobs(d.active_job_details) +
+          renderProcessTable('Possible Stuck / Heavy Processes', d.suspect_processes) +
+          renderProcessTable('Top Memory Processes', d.top_processes_by_memory) +
+          renderProcessTable('Top CPU Processes', d.top_processes_by_cpu) +
+          renderLogs(d.recent_log_errors) +
+        '</div>';
+      }
+
+      function renderMonitorError(errorMessage) {
+        var grid = document.getElementById('serversGrid');
+        grid.innerHTML = '<div class="server-card">' +
+          '<div class="server-card-title"><span class="dot red"></span>Monitor Error</div>' +
+          '<div class="error-msg">' + show(errorMessage) + '</div>' +
+        '</div>';
+      }
+
+      function fetchAll() {
+        var dot = document.getElementById('refreshDot');
+        dot.className = 'refresh-dot';
+
+        var apiUrl = '/server-stats-all?servers=' + encodeURIComponent(rawServers) + '&_=' + new Date().getTime();
+        xhrJson(apiUrl, 20000, function(err, data) {
+          if (err) {
+            renderMonitorError(err.message || String(err));
+            document.getElementById('lastUpdated').innerHTML = 'Monitor error';
+            dot.className = 'refresh-dot idle';
+            return;
+          }
+
+          if (!data || !data.ok || !data.servers) {
+            renderMonitorError('Invalid response from /server-stats-all');
+            document.getElementById('lastUpdated').innerHTML = 'Monitor error';
+            dot.className = 'refresh-dot idle';
+            return;
+          }
+
+          var grid = document.getElementById('serversGrid');
+          grid.innerHTML = data.servers.map(renderCard).join('');
+
+          var now = new Date();
+          document.getElementById('lastUpdated').innerHTML =
+            'Updated ' + twoDigit(now.getHours()) + ':' +
+            twoDigit(now.getMinutes()) + ':' +
+            twoDigit(now.getSeconds()) +
+            ' · Online: ' + show(data.online) +
+            ' · Offline: ' + show(data.offline);
+
+          dot.className = 'refresh-dot idle';
+        });
+      }
+
+      fetchAll();
+      refreshTimer = setInterval(fetchAll, autoRefreshSec * 1000);
+    </script>
+  </body>
+</html>

@@ -4,13 +4,15 @@ const path = require('path');
 const fs = require('fs');
 const {
   setFixedViewport,
-  captureViewportWidthFullHeight,
+  captureWithRetry,
   wait,
 } = require('../utils/screenshot');
 
 const API_ENDPOINT = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed';
 const PAGESPEED_VIEWPORT_WIDTH = 961;
 const PAGESPEED_VIEWPORT_HEIGHT = 900;
+const PAGESPEED_SCREENSHOT_RETRIES = 3;
+const PAGESPEED_SCREENSHOT_RETRY_DELAY_MS = 10000;
 
 function cleanValue(val) {
   if (!val || val === 'N/A') return val;
@@ -152,34 +154,62 @@ async function fetchPageSpeedData(domain, apiKey, strategy) {
 async function takeScreenshot(domain, scores, metrics, strategy, apiUrl, paths, newTab) {
   const htmlPath = path.join(paths.domainDir, '_pagespeed_card.html');
   const pngPath = path.join(paths.imagesDir, 'pagespeed.png');
+  let lastError = null;
 
-  try {
-    fs.writeFileSync(htmlPath, buildScorecardHtml(domain, scores, metrics, strategy, apiUrl), 'utf8');
+  fs.mkdirSync(paths.imagesDir, { recursive: true });
+  fs.writeFileSync(htmlPath, buildScorecardHtml(domain, scores, metrics, strategy, apiUrl), 'utf8');
 
-    const tab = await newTab();
+  for (let attempt = 1; attempt <= PAGESPEED_SCREENSHOT_RETRIES; attempt++) {
+    let tab = null;
+
     try {
-      await setFixedViewport(tab, PAGESPEED_VIEWPORT_WIDTH, PAGESPEED_VIEWPORT_HEIGHT);
-      const fileUrl = 'file://' + htmlPath;
-      await tab.goto(fileUrl, { waitUntil: 'load', timeout: 15000 });
-      await wait(400);
+      console.log(`   📈 PageSpeed screenshot attempt ${attempt}/${PAGESPEED_SCREENSHOT_RETRIES} for ${domain}`);
 
-      await captureViewportWidthFullHeight(tab, pngPath, {
+      tab = await newTab();
+      await setFixedViewport(tab, PAGESPEED_VIEWPORT_WIDTH, PAGESPEED_VIEWPORT_HEIGHT);
+      await tab.goto('file://' + htmlPath, { waitUntil: 'load', timeout: 30000 });
+      await wait(2500 + (attempt * 1000));
+
+      const hasContent = await tab.evaluate(() => {
+        return document.body && document.body.innerText && document.body.innerText.length > 10;
+      }).catch(() => false);
+
+      if (!hasContent) {
+        throw new Error('PageSpeed card HTML did not render content');
+      }
+
+      const screenshotFile = await captureWithRetry(tab, pngPath, {
         width: PAGESPEED_VIEWPORT_WIDTH,
         left: 0,
         right: 0,
         top: 0,
         bottom: 0,
-      });
+        minBytes: 1000,
+        settleBeforeCaptureMs: 1500,
+        retryBaseDelayMs: 4000,
+      }, 3);
 
-      return 'pagespeed.png';
+      console.log(`   📈 PageSpeed screenshot saved: ${screenshotFile}`);
+      return screenshotFile;
+    } catch (err) {
+      lastError = err;
+      console.error(`   📈 PageSpeed screenshot attempt ${attempt} failed: ${err.message}`);
+
+      try {
+        if (fs.existsSync(pngPath)) fs.unlinkSync(pngPath);
+      } catch (_) {}
+
+      if (attempt < PAGESPEED_SCREENSHOT_RETRIES) {
+        await wait(PAGESPEED_SCREENSHOT_RETRY_DELAY_MS * attempt);
+      }
     } finally {
-      await tab.close().catch(() => {});
-      try { fs.unlinkSync(htmlPath); } catch (_) {}
+      if (tab) await tab.close().catch(() => {});
     }
-  } catch (err) {
-    console.error(`   📈 Screenshot failed: ${err.message}`);
-    return null;
   }
+
+  try { fs.unlinkSync(htmlPath); } catch (_) {}
+  console.error(`   📈 PageSpeed screenshot failed after retries: ${lastError?.message || 'unknown error'}`);
+  return null;
 }
 
 async function runPageSpeed(domain, context) {

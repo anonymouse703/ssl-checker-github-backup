@@ -2,6 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SSL Checker — Jobs Monitor</title>
     <style>
       * { box-sizing: border-box; }
@@ -180,23 +181,70 @@
       }
 
       .job-main {
-        display: grid;
-        grid-template-columns: minmax(220px, 1.8fr) minmax(160px, 1fr) minmax(140px, 1fr) auto;
-        gap: 12px;
-        align-items: start;
+        /* Single-column job layout for FileMaker 17 Web Viewer.
+           This prevents the Started/ID block from being squeezed into
+           the right side and overlapping the progress/table area. */
+        display: block;
+        width: 100%;
+      }
+
+      .job-main > div {
+        min-width: 0;
+        width: 100%;
+      }
+
+      .job-content {
+        width: 100%;
+      }
+
+      .job-main .pb-wrap {
+        width: 100%;
+        margin-top: 8px;
+      }
+
+      .job-meta-inline {
+        display: inline-block;
+        font-size: 11px;
+        color: #777;
+        line-height: 1.4;
+        white-space: nowrap;
+        margin-left: 12px;
+      }
+
+      .job-meta-inline span {
+        display: inline-block;
+        margin-right: 14px;
+      }
+
+      .job-meta-inline code {
+        font-size: 10px;
+        color: #555;
       }
 
       .job-domain {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: wrap;
+        display: block;
+        width: 100%;
+        line-height: 1.8;
+        white-space: normal;
+      }
+
+      .job-domain > span {
+        vertical-align: middle;
+        margin-right: 10px;
+        margin-bottom: 3px;
+      }
+
+      .job-row-spacer {
+        display: inline-block;
+        width: 10px;
       }
 
       .domain-text {
+        display: inline-block;
         font-weight: 600;
         color: #185fa5;
         word-break: break-word;
+        margin-right: 12px;
       }
 
       .type-badge {
@@ -205,6 +253,7 @@
         border-radius: 6px;
         font-size: 10px;
         font-weight: 700;
+        margin-right: 8px;
       }
 
       .type-single {
@@ -224,6 +273,8 @@
         font-size: 10px;
         font-weight: 700;
         white-space: nowrap;
+        margin-left: 4px;
+        margin-right: 14px;
       }
 
       .status-running {
@@ -348,46 +399,136 @@
         margin-top: 8px;
         border-top: 1px solid #f0f0f0;
         padding-top: 6px;
+        max-height: 420px;
+        overflow-y: auto;
+        overflow-x: auto;
+        width: 100%;
       }
 
-      .domain-row-item {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        padding: 3px 0;
+      /* FileMaker 17 Web Viewer is safer with a real table than CSS grid. */
+      .domain-table {
+        width: 100%;
+        min-width: 560px;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      .domain-table th {
+        padding: 4px 6px 6px 6px;
+        border-bottom: 1px solid #f3f3f3;
+        color: #666;
+        font-size: 11px;
+        font-weight: 700;
+        text-align: left;
+        white-space: nowrap;
+      }
+
+      .domain-table td {
+        padding: 5px 6px;
+        vertical-align: middle;
+        border: none;
+        line-height: 1.35;
+      }
+
+      .domain-col-domain { width: 54%; }
+      .domain-col-time   { width: 24%; }
+      .domain-col-status { width: 22%; }
+
+      .domain-name-cell {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
       }
 
       .domain-dot {
+        display: inline-block;
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        flex-shrink: 0;
+        margin-right: 7px;
+        vertical-align: middle;
         transition: background 0.3s ease;
       }
 
       .domain-row-name {
-        font-size: 11px;
+        display: inline-block;
+        max-width: calc(100% - 20px);
+        font-size: 12px;
         color: #333;
-        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: middle;
       }
 
       .domain-row-status {
-        font-size: 10px;
+        font-size: 11px;
         color: #888;
-        min-width: 44px;
-        text-align: right;
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
-      .domain-row-item.is-done .domain-row-name { color: #1a6e31; }
-      .domain-row-item.is-failed .domain-row-name { color: #b02030; }
-      .domain-row-item.is-running .domain-row-name { color: #185fa5; font-weight: 600; }
+      .domain-row-time {
+        font-size: 11px;
+        color: #777;
+        text-align: left;
+        white-space: nowrap;
+      }
+
+      .domain-row-item.is-done .domain-row-name,
+      .domain-row-item.is-done .domain-row-status,
+      .domain-row-item.is-done .domain-row-time { color: #1a6e31; }
+      .domain-row-item.is-failed .domain-row-name,
+      .domain-row-item.is-failed .domain-row-status,
+      .domain-row-item.is-failed .domain-row-time { color: #b02030; }
+      .domain-row-item.is-running .domain-row-name,
+      .domain-row-item.is-running .domain-row-status,
+      .domain-row-item.is-running .domain-row-time { color: #185fa5; font-weight: 600; }
 
       @media (max-width: 980px) {
         .job-main {
-          grid-template-columns: 1fr;
+          display: block;
         }
         .job-actions {
           justify-content: flex-start;
+        }
+      }
+
+      @media (max-width: 620px) {
+        body {
+          padding: 8px;
+          font-size: 12px;
+        }
+        .panel {
+          padding: 10px;
+        }
+        .job-row {
+          padding: 8px 10px;
+        }
+        .server-header {
+          padding: 8px 10px;
+        }
+        .domain-col-domain { width: 50%; }
+        .domain-col-time   { width: 27%; }
+        .domain-col-status { width: 23%; }
+        .domain-table th,
+        .domain-table td {
+          padding-left: 2px;
+          padding-right: 2px;
+        }
+        .domain-table th,
+        .domain-row-status,
+        .domain-row-time {
+          font-size: 10px;
+        }
+        .domain-row-name {
+          font-size: 11px;
+        }
+        .stat-box {
+          min-width: 95px;
         }
       }
     </style>
@@ -417,7 +558,7 @@
         <div class="stat-box"><div class="stat-number" id="statSingle" style="color:#856404;">0</div><div class="stat-label">Single</div></div>
         <div class="stat-box"><div class="stat-number" id="statMulti" style="color:#5a2d91;">0</div><div class="stat-label">Multi-Batch</div></div>
         <div class="stat-box"><div class="stat-number" id="statDomains">0</div><div class="stat-label">Domains Active</div></div>
-        <div class="stat-box"><div class="stat-number" id="statReserved">—/—</div><div class="stat-label">Reserved Slots</div></div>
+        <div class="stat-box"><div class="stat-number" id="statScanned">0/0</div><div class="stat-label">Domains Scanned</div></div>
       </div>
     </div>
 
@@ -441,6 +582,8 @@
       var pendingFetches = 0;
       var doneKeys = {};       // tracks job keys already marked done
       var lastJobKeys = null;  // tracks previous job key set for smart re-render
+      var domainScanByKey = {}; // jobKey => { done: scanned domains, total: total domains }
+      var domainProcessTimeByKey = {}; // jobKey::domain => { startedMs, endedMs }
 
       function byId(id) {
         return document.getElementById(id);
@@ -512,8 +655,215 @@
         return Math.floor(diff / 3600) + "h " + Math.floor((diff % 3600) / 60) + "m";
       }
 
+      function formatDurationMs(ms) {
+        ms = Math.max(0, parseInt(ms || 0, 10));
+        var totalSeconds = Math.floor(ms / 1000);
+        if (totalSeconds < 60) return totalSeconds + "s";
+        var minutes = Math.floor(totalSeconds / 60);
+        var seconds = totalSeconds % 60;
+        if (minutes < 60) return minutes + "m " + seconds + "s";
+        var hours = Math.floor(minutes / 60);
+        minutes = minutes % 60;
+        return hours + "h " + minutes + "m";
+      }
+
+      function normalizeDomainStatus(status) {
+        var label = String(status || "queued").toLowerCase();
+        if (label === "processing" || label === "checking" || label === "running" || label === "scanning") return "scanning";
+        if (label === "done" || label === "complete" || label === "completed") return "done";
+        if (label === "failed" || label === "error") return "failed";
+        return "queued";
+      }
+
+      function processTimeKey(jobKeyValue, domain) {
+        return String(jobKeyValue || "") + "::" + String(domain || "");
+      }
+
+      function numericProcessMs(item) {
+        if (!item) return null;
+        var keys = ["process_time_ms", "processMs", "duration_ms", "durationMs", "elapsed_ms", "elapsedMs"];
+        for (var i = 0; i < keys.length; i++) {
+          if (typeof item[keys[i]] !== "undefined" && item[keys[i]] !== null && item[keys[i]] !== "") {
+            var n = parseInt(item[keys[i]], 10);
+            if (!isNaN(n)) return n;
+          }
+        }
+        return null;
+      }
+
+      function textProcessTime(item) {
+        if (!item) return "";
+        var keys = ["process_time", "processTime", "duration", "elapsed"];
+        for (var i = 0; i < keys.length; i++) {
+          if (typeof item[keys[i]] !== "undefined" && item[keys[i]] !== null && item[keys[i]] !== "") {
+            return String(item[keys[i]]);
+          }
+        }
+        return "";
+      }
+
+      function firstDateMs(item, keys) {
+        if (!item) return null;
+        for (var i = 0; i < keys.length; i++) {
+          if (item[keys[i]]) {
+            var t = new Date(item[keys[i]]).getTime();
+            if (!isNaN(t)) return t;
+          }
+        }
+        return null;
+      }
+
+      function deleteDomainProcessTimesForJob(key) {
+        var prefix = String(key || "") + "::";
+        for (var k in domainProcessTimeByKey) {
+          if (domainProcessTimeByKey.hasOwnProperty(k) && k.indexOf(prefix) === 0) {
+            delete domainProcessTimeByKey[k];
+          }
+        }
+      }
+
+      function updateDomainProcessTime(rowEl, status, statusItem) {
+        if (!rowEl) return;
+        var timeEl = rowEl.querySelector(".domain-row-time");
+        if (!timeEl) return;
+
+        var normalized = normalizeDomainStatus(status);
+        var key = rowEl.getAttribute("data-time-key") || "";
+        var now = new Date().getTime();
+        var rec = domainProcessTimeByKey[key] || {};
+        var apiMs = numericProcessMs(statusItem);
+        var apiText = textProcessTime(statusItem);
+        var apiStarted = firstDateMs(statusItem, ["started_at", "startedAt", "scan_started_at", "scanStartedAt"]);
+        var apiFinished = firstDateMs(statusItem, ["finished_at", "finishedAt", "scan_finished_at", "scanFinishedAt"]);
+
+        if (apiStarted !== null) rec.startedMs = apiStarted;
+        if (apiFinished !== null) rec.endedMs = apiFinished;
+
+        if (normalized === "scanning") {
+          if (!rec.startedMs) rec.startedMs = now;
+          rec.endedMs = null;
+          if (apiMs !== null) {
+            timeEl.textContent = formatDurationMs(apiMs);
+          } else if (apiText) {
+            timeEl.textContent = apiText;
+          } else {
+            timeEl.textContent = formatDurationMs(now - rec.startedMs);
+          }
+        } else if (normalized === "done" || normalized === "failed") {
+          if (apiMs !== null) {
+            timeEl.textContent = formatDurationMs(apiMs);
+          } else if (apiText) {
+            timeEl.textContent = apiText;
+          } else if (rec.startedMs) {
+            if (!rec.endedMs) rec.endedMs = now;
+            timeEl.textContent = formatDurationMs(rec.endedMs - rec.startedMs);
+          } else {
+            timeEl.textContent = "—";
+          }
+        } else {
+          timeEl.textContent = "—";
+        }
+
+        domainProcessTimeByKey[key] = rec;
+      }
+
       function jobKey(j) {
         return (j._server || "") + ":" + (j.batchId || j.jobId || j.key || j.domain || "");
+      }
+
+      function domainListForJob(j) {
+        if (j && j.domain_statuses && j.domain_statuses.length) {
+          var out = [];
+          for (var i = 0; i < j.domain_statuses.length; i++) out.push(j.domain_statuses[i].domain);
+          return out;
+        }
+        return (j && j.domains && j.domains.length) ? j.domains : [];
+      }
+
+      function domainStatusMap(items) {
+        var map = {};
+        items = items || [];
+        for (var i = 0; i < items.length; i++) {
+          if (items[i] && items[i].domain) map[items[i].domain] = items[i].status || "queued";
+        }
+        return map;
+      }
+
+      function domainStatusItemMap(items) {
+        var map = {};
+        items = items || [];
+        for (var i = 0; i < items.length; i++) {
+          if (items[i] && items[i].domain) map[items[i].domain] = items[i];
+        }
+        return map;
+      }
+
+      function toInt(v, fallback) {
+        var n = parseInt(v, 10);
+        return isNaN(n) ? (fallback || 0) : n;
+      }
+
+      function getDomainScanCounts(j) {
+        var key = jobKey(j);
+        if (domainScanByKey[key]) {
+          return domainScanByKey[key];
+        }
+
+        var done = 0;
+        var total = 0;
+
+        if (j.type === "multi") {
+          var dl = domainListForJob(j);
+          total = (dl && dl.length) ? dl.length : toInt(j.domain_count || j.total_domains || j.total, 0);
+
+          if (typeof j.done_count !== "undefined") {
+            done = toInt(j.done_count, 0);
+          } else if (j.domain_statuses && j.domain_statuses.length) {
+            for (var i = 0; i < j.domain_statuses.length; i++) {
+              if (j.domain_statuses[i] && j.domain_statuses[i].status === "done") done++;
+            }
+          }
+        } else if (j.type === "single") {
+          total = 1;
+          done = 0;
+        }
+
+        if (done > total) total = done;
+        return { done: done, total: total };
+      }
+
+      function rememberDomainScanCounts(key, done, total) {
+        done = toInt(done, 0);
+        total = toInt(total, 0);
+        if (done > total) total = done;
+        domainScanByKey[key] = { done: done, total: total };
+      }
+
+      function applyDomainStatusToRow(rowEl, status, statusItem) {
+        if (!rowEl) return;
+        var dotEl = rowEl.querySelector(".domain-dot");
+        var statusEl = rowEl.querySelector(".domain-row-status");
+        var cssClass = "";
+        var dotColor = "#ccc";
+        var label = normalizeDomainStatus(status);
+
+        if (label === "done") {
+          cssClass = "is-done";
+          dotColor = "#28a745";
+        } else if (label === "failed") {
+          cssClass = "is-failed";
+          dotColor = "#dc3545";
+        } else if (label === "scanning") {
+          cssClass = "is-running";
+          dotColor = "#185fa5";
+        } else {
+          label = "queued";
+        }
+
+        rowEl.className = "domain-row-item " + cssClass;
+        if (dotEl) dotEl.style.background = dotColor;
+        if (statusEl) statusEl.textContent = label;
+        updateDomainProcessTime(rowEl, label, statusItem || null);
       }
 
       function xhrGetJson(url, okFn, errFn) {
@@ -582,7 +932,7 @@
         byId("statSingle").innerHTML = "0";
         byId("statMulti").innerHTML = "0";
         byId("statDomains").innerHTML = "0";
-        byId("statReserved").innerHTML = "—/—";
+        byId("statScanned").innerHTML = "0/0";
         byId("jobsGroupedWrap").innerHTML = '<div class="empty-state">No scanning is ongoing.</div>';
         byId("lastUpdated").innerHTML = "Updated " + new Date().toLocaleTimeString();
         setAutoRefreshRate(IDLE_REFRESH_MS, "Idle");
@@ -654,6 +1004,15 @@
 
         merged = merged.filter(function(j) { return !doneKeys[jobKey(j)]; });
 
+        var activeKeyMap = {};
+        for (var ak = 0; ak < merged.length; ak++) activeKeyMap[jobKey(merged[ak])] = true;
+        for (var storedKey in domainScanByKey) {
+          if (domainScanByKey.hasOwnProperty(storedKey) && !activeKeyMap[storedKey] && !doneKeys[storedKey]) {
+            delete domainScanByKey[storedKey];
+            deleteDomainProcessTimesForJob(storedKey);
+          }
+        }
+
         if (okCount === 0) {
           byId("lastUpdated").innerHTML = "Updated " + new Date().toLocaleTimeString();
           return;
@@ -679,7 +1038,9 @@
           emptyClearTimer = null;
         }
 
-        var newKeyStr = merged.map(jobKey).sort().join("|");
+        var newKeyStr = merged.map(function(j) {
+          return jobKey(j) + ":" + domainListForJob(j).length + ":" + (j.done_count || 0) + ":" + (j.processing_count || 0);
+        }).sort().join("|");
 
         allJobs = merged;
         updateStats();
@@ -701,31 +1062,33 @@
         var singles = 0;
         var multis = 0;
         var domainCount = 0;
-        var reserved = "—";
-        var maxR = "—";
+        var scannedDone = 0;
+        var scannedTotal = 0;
 
         for (var i = 0; i < allJobs.length; i++) {
           var j = allJobs[i];
+
           if (j.type === "single") {
             singles++;
             domainCount++;
           } else if (j.type === "multi") {
             multis++;
-            if (j.domains && j.domains.length) domainCount += j.domains.length;
+            var dl = domainListForJob(j);
+            if (dl && dl.length) domainCount += dl.length;
+            else if (j.domain_count) domainCount += parseInt(j.domain_count || "0", 10) || 0;
             else if (j.domain) domainCount++;
           }
-        }
 
-        if (allJobs.length > 0) {
-          reserved = typeof allJobs[0]._reserved !== "undefined" ? allJobs[0]._reserved : "—";
-          maxR = typeof allJobs[0]._max !== "undefined" ? allJobs[0]._max : "—";
+          var scanCounts = getDomainScanCounts(j);
+          scannedDone += scanCounts.done;
+          scannedTotal += scanCounts.total;
         }
 
         byId("statTotal").innerHTML = allJobs.length;
         byId("statSingle").innerHTML = singles;
         byId("statMulti").innerHTML = multis;
         byId("statDomains").innerHTML = domainCount;
-        byId("statReserved").innerHTML = reserved + "/" + maxR;
+        byId("statScanned").innerHTML = scannedDone + "/" + scannedTotal;
       }
 
       function groupJobsByServer() {
@@ -807,23 +1170,45 @@
         html += '<div class="job-row" id="row-' + esc(key) + '">';
         html += '<div class="job-main">';
 
-        html += "<div>";
+        html += '<div class="job-content">';
         html += '<div class="job-domain">';
         html += '<span class="type-badge ' + (isMulti ? "type-multi" : "type-single") + '">' + (isMulti ? "multi" : "single") + "</span>";
         html += '<span class="domain-text">' + domainLabel + "</span>";
         html += '<span class="status-badge status-idle" id="status-' + esc(key) + '">Waiting...</span>';
+        html += '<span class="job-row-spacer">&nbsp;</span>';
+        html += '<span class="job-meta-inline">';
+        html += '<span id="elapsed-' + esc(key) + '" data-started="' + esc(j.startedAt || "") + '">Started: ' + esc(elapsed(j.startedAt)) + '</span>';
+        html += '<span>&nbsp;&nbsp;ID: <code>' + esc((isMulti ? batchId : jobId) || "—") + '</code></span>';
+        html += '</span>';
         html += "</div>";
 
-        if (isMulti && j.domains && j.domains.length) {
+        var domainsForDisplay = domainListForJob(j);
+        var statusByDomain = domainStatusMap(j.domain_statuses || []);
+        var statusItemByDomain = domainStatusItemMap(j.domain_statuses || []);
+        if (isMulti && domainsForDisplay && domainsForDisplay.length) {
           html += '<div class="domain-rows" id="domain-rows-' + esc(key) + '">';
-          for (var i = 0; i < j.domains.length; i++) {
-            html += '<div class="domain-row-item" id="drow-' + esc(key) + '-' + i + '">';
-            html += '<span class="domain-dot" style="background:#ccc;"></span>';
-            html += '<span class="domain-row-name">' + esc(j.domains[i]) + '</span>';
-            html += '<span class="domain-row-status">queued</span>';
-            html += '</div>';
+          html += '<table class="domain-table" cellspacing="0" cellpadding="0">';
+          html += '<colgroup><col class="domain-col-domain"><col class="domain-col-time"><col class="domain-col-status"></colgroup>';
+          html += '<thead><tr><th>Domain</th><th>Process time</th><th>Status</th></tr></thead>';
+          html += '<tbody>';
+          for (var i = 0; i < domainsForDisplay.length; i++) {
+            var domainName = domainsForDisplay[i];
+            var initialStatus = normalizeDomainStatus(statusByDomain[domainName] || "queued");
+            var initialStatusItem = statusItemByDomain[domainName] || null;
+            var rowClass = initialStatus === "done" ? " is-done" : initialStatus === "failed" ? " is-failed" : initialStatus === "scanning" ? " is-running" : "";
+            var dotColor = initialStatus === "done" ? "#28a745" : initialStatus === "failed" ? "#dc3545" : initialStatus === "scanning" ? "#185fa5" : "#ccc";
+            var timeKey = processTimeKey(key, domainName);
+            var initialApiMs = numericProcessMs(initialStatusItem);
+            var initialApiText = textProcessTime(initialStatusItem);
+            var initialTimeText = initialApiMs !== null ? formatDurationMs(initialApiMs) : (initialApiText || "—");
+            html += '<tr class="domain-row-item' + rowClass + '" id="drow-' + esc(key) + '-' + i + '" data-time-key="' + esc(timeKey) + '" data-domain="' + esc(domainName) + '">';
+            html += '<td class="domain-name-cell"><span class="domain-dot" style="background:' + dotColor + ';"></span>';
+            html += '<span class="domain-row-name" title="' + esc(domainName) + '">' + esc(domainName) + '</span></td>';
+            html += '<td class="domain-row-time">' + esc(initialTimeText) + '</td>';
+            html += '<td class="domain-row-status">' + esc(initialStatus || "queued") + '</td>';
+            html += '</tr>';
           }
-          html += '</div>';
+          html += '</tbody></table></div>';
         }
 
         html += '<div class="tools-line">Tools: ' + toolsHtml + "</div>";
@@ -832,11 +1217,6 @@
         html += '<div class="pb-wrap">';
         html += '<div class="pb-track"><div class="pb-fill" id="fill-' + esc(key) + '" style="width:0%"></div></div>';
         html += '<div class="pb-text" id="pt-' + esc(key) + '">—</div>';
-        html += "</div>";
-
-        html += '<div class="job-meta">';
-        html += '<div id="elapsed-' + esc(key) + '" data-started="' + esc(j.startedAt || "") + '">Started: ' + esc(elapsed(j.startedAt)) + "</div>";
-        html += '<div>ID: <code style="font-size:10px;">' + esc((isMulti ? batchId : jobId) || "—") + "</code></div>";
         html += "</div>";
 
         // html += '<div class="job-actions">';
@@ -861,6 +1241,11 @@
 
       function markJobDone(key, j) {
         if (doneKeys[key]) return;
+
+        var finalCounts = getDomainScanCounts(j);
+        rememberDomainScanCounts(key, finalCounts.total || 1, finalCounts.total || 1);
+        updateStats();
+
         doneKeys[key] = true;
 
         var fill  = byId("fill-"   + key);
@@ -872,7 +1257,7 @@
         if (badge) { badge.textContent = "Done ✓"; badge.className = "status-badge status-done"; }
         if (pt)    { pt.textContent = "Completed"; }
 
-        var metaDiv = row && row.querySelector(".job-meta div:first-child");
+        var metaDiv = byId("elapsed-" + key);
         if (metaDiv) metaDiv.style.color = "#28a745";
 
         setTimeout(function() {
@@ -888,6 +1273,8 @@
           setTimeout(function() {
             if (row.parentNode) row.parentNode.removeChild(row);
             allJobs = allJobs.filter(function(jb) { return jobKey(jb) !== key; });
+            delete domainScanByKey[key];
+            deleteDomainProcessTimesForJob(key);
             updateStats();
 
             if (getVisibleJobRowCount() === 0) {
@@ -921,6 +1308,11 @@
             statusUpper.indexOf("STARTING") >= 0 ||
             statusUpper.indexOf("QUEUED") >= 0;
 
+          if (!isMulti) {
+            rememberDomainScanCounts(key, isDone ? 1 : 0, 1);
+            updateStats();
+          }
+
           var fill = byId("fill-" + key);
           var pt = byId("pt-" + key);
           var badge = byId("status-" + key);
@@ -947,29 +1339,35 @@
             badge.className = "status-badge " + (isDone ? "status-done" : "status-running");
           }
 
-          if (isMulti && j.domains && j.domains.length) {
+          if (isMulti) {
+            var domainsForDisplay = domainListForJob(j);
+            if (data.domains && data.domains.length) domainsForDisplay = data.domains;
+
+            var statusByDomain = domainStatusMap(data.domain_statuses || []);
+            var statusItemByDomain = domainStatusItemMap(data.domain_statuses || []);
             var completedDomains = data.completed_domains || [];
             var failedDomains = data.failed_domains || [];
-            var lastDomain = p.last_domain || "";
+            var currentDomain = p.current_domain || "";
 
-            for (var di = 0; di < j.domains.length; di++) {
-              var d = j.domains[di];
-              var rowEl = byId("drow-" + key + "-" + di);
-              if (!rowEl) continue;
+            var scannedTotal = domainsForDisplay && domainsForDisplay.length ? domainsForDisplay.length : total;
+            var scannedDone = typeof data.done_count !== "undefined" ? data.done_count : completedDomains.length;
+            rememberDomainScanCounts(key, scannedDone, scannedTotal);
+            updateStats();
 
-              var isDomDone   = completedDomains.indexOf(d) >= 0;
-              var isDomFail   = failedDomains.indexOf(d) >= 0;
-              var isDomRun    = !isDomDone && !isDomFail && d === lastDomain && !isDone;
+            for (var di = 0; di < domainsForDisplay.length; di++) {
+              var d = domainsForDisplay[di];
+              var statusLabel = statusByDomain[d] || "queued";
+              var statusItem = statusItemByDomain[d] || null;
 
-              var dotColor    = isDomDone ? "#28a745" : isDomFail ? "#dc3545" : isDomRun ? "#185fa5" : "#ccc";
-              var statusLabel = isDomDone ? "done"    : isDomFail ? "failed"  : isDomRun ? "running" : "queued";
-              var cssClass    = isDomDone ? "is-done" : isDomFail ? "is-failed" : isDomRun ? "is-running" : "";
+              if (!statusByDomain[d]) {
+                var isDomDone = completedDomains.indexOf(d) >= 0;
+                var isDomFail = failedDomains.indexOf(d) >= 0;
+                var isDomRun  = !isDomDone && !isDomFail && d === currentDomain && !isDone;
+                statusLabel = isDomDone ? "done" : isDomFail ? "failed" : isDomRun ? "scanning" : "queued";
+                statusItem = { domain: d, status: statusLabel };
+              }
 
-              rowEl.className = "domain-row-item " + cssClass;
-              var dotEl = rowEl.querySelector(".domain-dot");
-              var statusEl = rowEl.querySelector(".domain-row-status");
-              if (dotEl) dotEl.style.background = dotColor;
-              if (statusEl) statusEl.textContent = statusLabel;
+              applyDomainStatusToRow(byId("drow-" + key + "-" + di), statusLabel, statusItem);
             }
           }
 
@@ -1068,6 +1466,11 @@
           if (doneKeys[key]) continue; // frozen — job is done
           var started = el.getAttribute("data-started");
           if (started) el.textContent = "Started: " + elapsed(started);
+        }
+
+        var runningDomainRows = document.querySelectorAll(".domain-row-item.is-running");
+        for (var r = 0; r < runningDomainRows.length; r++) {
+          updateDomainProcessTime(runningDomainRows[r], "scanning", null);
         }
       }
 

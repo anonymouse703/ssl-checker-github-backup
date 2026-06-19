@@ -4,7 +4,7 @@ const { getErrorCode } = require('../utils/error-codes');
 const path = require('path');
 const {
   setFixedViewport,
-  captureViewportWidthFullHeight,
+  captureWithRetry,
   wait,
 } = require('../utils/screenshot');
 
@@ -12,7 +12,7 @@ const DNS_VIEWPORT_WIDTH = 1080;
 const DNS_VIEWPORT_HEIGHT = 935;
 const DNS_TOP_CROP = 0;
 
-async function runWhatsMyDNS(domain, context) {
+async function runWhatsMyDNSOnce(domain, context) {
   const { newTab, paths } = context;
 
   const screenshotPath = path.join(paths.imagesDir, 'dns.png');
@@ -25,21 +25,56 @@ async function runWhatsMyDNS(domain, context) {
 
   async function shootTab() {
     try {
-      await tab.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-      await wait(500);
+      // Extra settle time — capture even when all results are X (failed)
+      await wait(3000);
 
-      await captureViewportWidthFullHeight(tab, screenshotPath, {
+      await captureWithRetry(tab, screenshotPath, {
         width: DNS_VIEWPORT_WIDTH,
         left: 0,
         right: 0,
         top: DNS_TOP_CROP,
         bottom: 0,
-      });
+        minBytes: 1000,
+      }, 3);
 
       return 'dns.png';
-    } catch (_) {
+    } catch (err) {
+      console.error(`[dns] Screenshot failed: ${err.message}`);
       return null;
     }
+  }
+
+  async function waitThroughSecurityVerification(timeoutMs = 90000) {
+    const start = Date.now();
+    let reloads = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      const state = await tab.evaluate(() => {
+        const text = (document.body?.innerText || '').toLowerCase();
+        const href = window.location.href || '';
+        const hasInput = !!document.querySelector('input[type="text"], input[type="search"], input[name="domain"], input');
+        const hasSearchButton = /search|lookup|check/i.test(document.body?.innerText || '');
+        const verifying =
+          text.includes('performing security verification') ||
+          text.includes('security verification') ||
+          text.includes('verifying') ||
+          text.includes('checking if the site connection is secure') ||
+          text.includes('cloudflare');
+        return { href, hasInput, hasSearchButton, verifying };
+      }).catch(() => ({ verifying: false, hasInput: false, hasSearchButton: false }));
+
+      if (!state.verifying && (state.hasInput || state.hasSearchButton)) return true;
+
+      if (state.verifying && reloads < 2 && Date.now() - start > (reloads + 1) * 25000) {
+        reloads++;
+        console.log(`[dns] Security verification still showing for ${domain}; reload ${reloads}/2`);
+        await tab.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      }
+
+      await wait(3000);
+    }
+
+    return false;
   }
 
   async function spinnerAppeared(timeoutMs = 12000) {
@@ -94,7 +129,8 @@ async function runWhatsMyDNS(domain, context) {
       const statusIcons = document.querySelectorAll(
         'svg[fill="#22cc22"], svg[fill="#cc2222"], .text-success, .text-danger, .status-ok, .status-fail'
       );
-      if (statusIcons.length > 3) return true;
+      // Lower threshold — even all-failed results (all X marks) should count as loaded
+      if (statusIcons.length > 0) return true;
 
       if (/\b\d+\s*\/\s*\d+\b/.test(bodyText)) return true;
 
@@ -134,10 +170,11 @@ async function runWhatsMyDNS(domain, context) {
           }
         }
 
+        // Count status icons — even all-X results should trigger screenshot
         const statusIcons = document.querySelectorAll(
           'svg[fill="#22cc22"], svg[fill="#cc2222"], .text-success, .text-danger, .status-ok, .status-fail'
         );
-        if (statusIcons.length > 3) return true;
+        if (statusIcons.length > 0) return true;
 
         const bodyText = document.body?.innerText || '';
         if (/\b\d+\s*\/\s*\d+\b/.test(bodyText)) return true;
@@ -239,6 +276,7 @@ async function runWhatsMyDNS(domain, context) {
       timeout: 30000
     });
 
+    await waitThroughSecurityVerification(90000).catch(() => false);
     await tab.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
     await wait(2500);
 
@@ -252,19 +290,43 @@ async function runWhatsMyDNS(domain, context) {
     }
 
     if (!loaded) {
-      await captureViewportWidthFullHeight(tab, debugPath, {
+      // Even if not "loaded", take a debug screenshot and continue
+      console.log(`[dns] Results not fully detected for ${domain} — capturing anyway`);
+      await captureWithRetry(tab, debugPath, {
         width: DNS_VIEWPORT_WIDTH,
         left: 0,
         right: 0,
         top: DNS_TOP_CROP,
         bottom: 0,
-      }).catch(() => {});
+      }, 2).catch(() => {});
     }
+
+    // Extra settle before scroll + screenshot
+    await wait(3000);
+
+    // Scroll to results area
+    await tab.evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll('input, table, [data-id], .dns-checker-result'));
+      const target =
+        candidates.find(el => {
+          const text = (el.innerText || el.value || '').toLowerCase();
+          return text.includes('.') || text.includes('search') || el.matches('table, [data-id], .dns-checker-result');
+        }) || document.querySelector('input');
+
+      if (target) {
+        target.scrollIntoView({ block: 'start', inline: 'nearest' });
+        window.scrollBy(0, -120);
+      } else {
+        window.scrollTo(0, 0);
+      }
+    }).catch(() => {});
 
     await wait(1200);
 
     const data = await extractWhatsMyDnsData();
     const currentUrl = await tab.evaluate(() => window.location.href).catch(() => targetUrl);
+
+    // Always attempt screenshot regardless of load status
     const screenshot = await shootTab();
 
     return {
@@ -340,7 +402,9 @@ async function runWhatsMyDNS(domain, context) {
   try {
     const primary = await runPrimary();
 
-    if (primary && primary.data) {
+    // Primary page can sometimes screenshot the input page before the result table is ready.
+    // Accept it only when real resolver rows were parsed. Otherwise use fallback source.
+    if (primary && primary.data && Number(primary.data.totalServers || 0) > 0) {
       return primary;
     }
 
@@ -361,6 +425,59 @@ async function runWhatsMyDNS(domain, context) {
   } finally {
     await tab.close().catch(() => {});
   }
+}
+
+
+async function runWhatsMyDNS(domain, context) {
+  const maxRetries = parseInt(process.env.WHATSMYDNS_MAX_RETRIES || '5', 10);
+  let lastResult = null;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[dns] Attempt ${attempt}/${maxRetries} for ${domain}`);
+      const result = await runWhatsMyDNSOnce(domain, context);
+      lastResult = result;
+
+      const totalServers = Number(result?.data?.totalServers || 0);
+
+      if (result && result.screenshot && totalServers > 0) {
+        return result;
+      }
+
+      lastError = new Error(
+        result?.error ||
+        `DNS returned incomplete data: totalServers=${totalServers}, screenshot=${result?.screenshot || 'none'}`
+      );
+      console.error(`[dns] Attempt ${attempt} incomplete for ${domain}: ${lastError.message}`);
+    } catch (err) {
+      lastError = err;
+      console.error(`[dns] Attempt ${attempt} error for ${domain}: ${err.message}`);
+    }
+
+    if (attempt < maxRetries) {
+      await wait(attempt * 10000);
+    }
+  }
+
+  if (lastResult) {
+    return {
+      ...lastResult,
+      status: lastResult.status || 'SUCCESS',
+      error: lastResult.error || `DNS screenshot missing after ${maxRetries} attempts`,
+      errorCode: lastResult.errorCode || getErrorCode({ error: 'DNS_SCREENSHOT_MISSING' }),
+      screenshot: null,
+    };
+  }
+
+  return {
+    status: 'ERROR',
+    data: null,
+    error: lastError?.message || 'DNS capture failed',
+    errorCode: getErrorCode({ error: lastError?.message || 'DNS_CAPTURE_FAILED' }),
+    url: null,
+    screenshot: null,
+  };
 }
 
 module.exports = { runWhatsMyDNS };

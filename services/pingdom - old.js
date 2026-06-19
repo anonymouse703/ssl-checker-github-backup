@@ -1,8 +1,6 @@
 'use strict';
 
 const { getErrorCode } = require('../utils/error-codes');
-const puppeteer = require('puppeteer');
-const { resolveChromePath } = require('../utils/chrome-path');
 const fs = require('fs');
 const path = require('path');
 const {
@@ -16,41 +14,9 @@ const USER_AGENT =
 
 const PINGDOM_VIEWPORT_WIDTH = 1064;
 const PINGDOM_VIEWPORT_HEIGHT = 900;
-const DEFAULT_WANTED_LOCATION = 'North America - USA - San Francisco';
-const DEFAULT_MAX_PINGDOM_RETRIES = 3;       // each tool gets 3 attempts before N/A fallback
+const WANTED_LOCATION = 'North America - USA - San Francisco';
+const MAX_PINGDOM_RETRIES = 3;               // each tool gets 3 attempts before N/A fallback
 const PINGDOM_SCREENSHOT_RETRIES = 3;
-
-function envInt(name, fallback) {
-  const n = parseInt(process.env[name] || '', 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function getWantedLocation() {
-  return String(process.env.PINGDOM_LOCATION || DEFAULT_WANTED_LOCATION).trim();
-}
-
-function getMaxPingdomRetries() {
-  return envInt('PINGDOM_ATTEMPTS', envInt('PINGDOM_MAX_RETRIES', DEFAULT_MAX_PINGDOM_RETRIES));
-}
-
-function getPingdomResultWaitMs() {
-  return envInt('PINGDOM_RESULT_MAX_WAIT_MS', envInt('PINGDOM_TIMEOUT_MS', 180000));
-}
-
-function getPingdomStableMetricsWaitMs() {
-  return envInt('PINGDOM_STABLE_METRICS_WAIT_MS', 150000);
-}
-
-function getPingdomToolUrls() {
-  const raw = String(process.env.PINGDOM_TOOLS_URLS || 'https://tools.pingdom.com/,https://tool.pingdom.com/');
-  const urls = raw
-    .split(',')
-    .map(v => v.trim())
-    .filter(Boolean)
-    .map(v => v.endsWith('/') ? v : `${v}/`);
-  return urls.length ? Array.from(new Set(urls)) : ['https://tools.pingdom.com/'];
-}
-
 
 function pingdomNAResult(errorMessage) {
   return {
@@ -96,7 +62,7 @@ async function fillPingdomUrl(page, domain) {
 }
 
 async function setPingdomLocation(page) {
-  const wanted = getWantedLocation();
+  const wanted = WANTED_LOCATION;
 
   const normalize = (s) =>
     String(s || '')
@@ -170,10 +136,10 @@ async function clickPingdomStartTest(page) {
 
     const appSelects = Array.from(document.querySelectorAll('app-select'));
     return appSelects.some((el) => normalize(el.textContent || '') === wantedNorm);
-  }, getWantedLocation());
+  }, WANTED_LOCATION);
 
   if (!locationVerified) {
-    throw new Error(`Pingdom visible location is not "${getWantedLocation()}" before clicking START TEST.`);
+    throw new Error(`Pingdom visible location is not "${WANTED_LOCATION}" before clicking START TEST.`);
   }
 
   const clicked = await page.evaluate(() => {
@@ -198,7 +164,7 @@ async function clickPingdomStartTest(page) {
 async function waitForPingdomResults(page, domain) {
   console.log(`[pingdom] Waiting for test results for ${domain}...`);
 
-  const maxWaitMs = getPingdomResultWaitMs();
+  const maxWaitMs = 180000; // increased to 3 minutes
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWaitMs) {
@@ -828,635 +794,58 @@ async function waitForStableOrPartialPingdomMetrics(page, domain, timeoutMs = 15
   return null;
 }
 
-// ---------- Pingdom browser/session helpers ----------
-function useDedicatedPingdomBrowser() {
-  // Pingdom is sensitive to the shared stealth page and to generic overlay
-  // auto-clickers. Always keep it on its own plain Puppeteer browser/session.
-  // This prevents the screenshot from being redirected to SolarWinds legal pages
-  // via footer links such as "Software Services Agreement".
-  const requested = String(process.env.PINGDOM_USE_DEDICATED_BROWSER || 'true').trim().toLowerCase();
-  if (['0', 'false', 'no', 'off', 'shared'].includes(requested)) {
-    console.warn('[pingdom] Ignoring PINGDOM_USE_DEDICATED_BROWSER=false/shared; Pingdom must use a dedicated non-stealth browser.');
-  }
-  return true;
-}
-
-function requestAlreadyHandled(req) {
-  return typeof req.isInterceptResolutionHandled === 'function' && req.isInterceptResolutionHandled();
-}
-
-async function safeAbort(req) {
-  try {
-    if (!requestAlreadyHandled(req)) await req.abort();
-  } catch (_) {}
-}
-
-async function safeContinue(req) {
-  try {
-    if (!requestAlreadyHandled(req)) await req.continue();
-  } catch (_) {}
-}
-
-async function launchPingdomBrowser() {
-  const executablePath = resolveChromePath();
-  if (!executablePath) {
-    throw new Error('Chrome executable not found. Set PUPPETEER_EXECUTABLE_PATH in .env or install Chrome.');
-  }
-
-  return await puppeteer.launch({
-    headless: true,
-    executablePath,
-    ignoreHTTPSErrors: true,
-    protocolTimeout: 600000,
-    timeout: 600000,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--window-size=1280,900',
-      '--disable-extensions',
-      '--disable-sync',
-      '--disable-translate',
-      '--disable-default-apps',
-      '--mute-audio',
-      '--no-first-run',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-      '--js-flags=--max-old-space-size=256',
-      '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-    ],
-  });
-}
-
-async function createPingdomTab(context) {
-  let ownedBrowser = null;
+// ---------- Single attempt function (retryable) ----------
+async function runPingdomOnce(domain, context, attempt) {
+  const { newTab, paths } = context;
+  const debugDir = paths.domainDir;
+  const screenshotPath = path.join(paths.imagesDir, 'pingdom.png');
+  const errorScreenshotPath = path.join(paths.imagesDir, `pingdom-error-attempt-${attempt}.png`);
   let tab = null;
 
-  if (useDedicatedPingdomBrowser()) {
-    ownedBrowser = await launchPingdomBrowser();
-    tab = await ownedBrowser.newPage();
-  } else {
-    if (!context || typeof context.newTab !== 'function') {
-      throw new Error('Pingdom requires context.newTab when PINGDOM_USE_DEDICATED_BROWSER=false');
-    }
-    tab = await context.newTab();
+  try {
+    tab = await newTab();
 
-    // If the shared scanner browser/page already attached a default request handler,
-    // remove it for Pingdom and install one Pingdom-specific handler below.
-    try { tab.removeAllListeners('request'); } catch (_) {}
-  }
-
-  await tab.setViewport({
-    width: PINGDOM_VIEWPORT_WIDTH,
-    height: PINGDOM_VIEWPORT_HEIGHT,
-    deviceScaleFactor: 1,
-  });
-
-  await tab.setUserAgent(USER_AGENT);
-  tab.setDefaultNavigationTimeout(300000);
-  tab.setDefaultTimeout(300000);
-
-  await tab.setRequestInterception(true).catch(() => {});
-  tab.on('request', async (req) => {
-    const url = req.url().toLowerCase();
-    const type = req.resourceType();
-
-    // Keep this conservative. Do NOT block perfdrive.com, Pingdom/SolarWinds scripts,
-    // documents, XHR/fetch, or app bundles. Blocking those is what commonly prevents
-    // the Pingdom app shell/results from loading.
-    if (
-      type === 'media' ||
-      url.includes('google-analytics.com') ||
-      url.includes('googletagmanager.com') ||
-      url.includes('doubleclick.net') ||
-      url.includes('facebook.net') ||
-      url.includes('hotjar.com') ||
-      url.includes('clarity.ms')
-    ) {
-      await safeAbort(req);
-      return;
-    }
-
-    await safeContinue(req);
-  });
-
-  return { tab, ownedBrowser };
-}
-
-async function inspectPingdomShell(page) {
-  return await page.evaluate(() => {
-    const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim();
-    const text = clean(document.body ? document.body.innerText : '');
-    const inputs = Array.from(document.querySelectorAll('input, textarea'));
-    const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"]'));
-
-    const hasUrlInput = inputs.some((el) => {
-      const value = clean(el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.name || el.id || el.type || '');
-      return /url|website|domain|example|www\.example\.com|text/i.test(value);
+    await tab.setViewport({
+      width: PINGDOM_VIEWPORT_WIDTH,
+      height: PINGDOM_VIEWPORT_HEIGHT,
+      deviceScaleFactor: 1,
     });
 
-    const hasStartButton = buttons.some((el) => /start\s*test/i.test(clean(el.value || el.innerText || el.textContent)));
-    const hasLocationControl = !!document.querySelector('app-select') || /test\s*from/i.test(text);
-    const hasAppShell = hasUrlInput && hasStartButton && hasLocationControl;
+    await tab.setUserAgent(USER_AGENT);
+    tab.setDefaultNavigationTimeout(300000);
+    tab.setDefaultTimeout(300000);
 
-    return {
-      stage: 'initial tools.pingdom.com load',
-      url: location.href,
-      title: document.title || '',
-      canonical: document.querySelector('link[rel="canonical"]')?.href || '',
-      hasUrlInput,
-      hasStartButton,
-      hasLocationControl,
-      hasAppShell,
-      text: text.slice(0, 1000),
-    };
-  }).catch(() => ({
-    stage: 'initial tools.pingdom.com load',
-    url: page.url ? page.url() : '',
-    title: '',
-    canonical: '',
-    hasUrlInput: false,
-    hasStartButton: false,
-    hasLocationControl: false,
-    hasAppShell: false,
-    text: '',
-  }));
-}
+    const existingInterception = await tab.evaluate(() => true).then(() => false).catch(() => false);
+    if (!existingInterception) {
+      await tab.setRequestInterception(true).catch(() => {});
+    }
 
-async function loadPingdomToolShell(page, domain, debugDir, attempt) {
-  const urls = getPingdomToolUrls();
-  let lastState = null;
+    tab.on('request', (req) => {
+      const url = req.url().toLowerCase();
+      const type = req.resourceType();
 
-  for (const toolUrl of urls) {
-    console.log(`[pingdom] Loading tool shell from ${toolUrl} for ${domain}`);
+      if (
+        type === 'media' ||
+        url.includes('google-analytics.com') ||
+        url.includes('googletagmanager.com') ||
+        url.includes('doubleclick.net') ||
+        url.includes('hotjar.com') ||
+        url.includes('clarity.ms')
+      ) {
+        req.abort().catch(() => {});
+        return;
+      }
+      req.continue().catch(() => {});
+    });
 
-    await page.goto(toolUrl, {
+    await tab.goto('https://tools.pingdom.com/', {
       waitUntil: 'domcontentloaded',
       timeout: 90000,
     });
 
     await wait(5000);
-    await waitForFonts(page, 15000);
-    await wait(1500);
-
-    const state = await inspectPingdomShell(page);
-    lastState = state;
-
-    try {
-      const safeHost = String(toolUrl).replace(/^https?:\/\//i, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
-      fs.writeFileSync(path.join(debugDir, `pingdom-tool-shell-${safeHost}-attempt-${attempt}.json`), JSON.stringify(state, null, 2));
-    } catch (_) {}
-
-    if (state.hasAppShell) {
-      console.log(`[pingdom] Tool shell loaded from ${toolUrl}`);
-      return { toolUrl, state };
-    }
-
-    console.warn(`[pingdom] Tool shell not detected from ${toolUrl}; landed on ${state.url || page.url()}`);
-  }
-
-  const landedUrl = lastState?.url || page.url();
-  const title = lastState?.title || '';
-  const text = lastState?.text || '';
-
-  if (/https?:\/\/www\.pingdom\.com\/?/i.test(landedUrl)) {
-    throw new Error(
-      `PINGDOM_BOUNCED_TO_HOMEPAGE: Pingdom redirected to the www.pingdom.com marketing page before the speed-test app loaded. URL: ${landedUrl}, title: "${title}"`
-    );
-  }
-
-  throw new Error(
-    `PINGDOM_TOOL_SHELL_MISSING: Could not find Pingdom URL input, START TEST button, and Test From location control. URL: ${landedUrl}, title: "${title}", text: "${text.slice(0, 180)}"`
-  );
-}
-
-
-async function getPingdomPageState(page) {
-  return await page.evaluate(() => {
-    const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim();
-    const text = clean(document.body ? document.body.innerText : '');
-    const lowerText = text.toLowerCase();
-    const url = location.href || '';
-    const title = document.title || '';
-
-    const hasResults =
-      /your\s+results/i.test(text) &&
-      (/performance\s+grade/i.test(text) || /download\s+har/i.test(text)) &&
-      (/page\s+size/i.test(text) || /load\s+time/i.test(text) || /requests/i.test(text));
-
-    const isAgreementPage =
-      /solarwinds\s+software\s+services\s+agreement/i.test(text) ||
-      (/download\s+the\s+pdf\s+version/i.test(text) && /agreement/i.test(text)) ||
-      /software-services-agreement/i.test(url) ||
-      /\/legal\//i.test(url);
-
-    const isMarketingPage =
-      /www\.pingdom\.com/i.test(url) ||
-      (/request\s+quote/i.test(text) && /solarwinds/i.test(text) && !hasResults);
-
-    return {
-      url,
-      title,
-      hasResults,
-      isAgreementPage,
-      isMarketingPage,
-      text: text.slice(0, 800),
-    };
-  }).catch(() => ({
-    url: page && typeof page.url === 'function' ? page.url() : '',
-    title: '',
-    hasResults: false,
-    isAgreementPage: false,
-    isMarketingPage: false,
-    text: '',
-  }));
-}
-
-async function assertPingdomResultsScreenshotPage(page, domain, debugDir, attempt) {
-  const state = await getPingdomPageState(page);
-
-  try {
-    if (debugDir) {
-      fs.writeFileSync(
-        path.join(debugDir, `pingdom-before-screenshot-state-attempt-${attempt}.json`),
-        JSON.stringify(state, null, 2)
-      );
-    }
-  } catch (_) {}
-
-  if (state.isAgreementPage || state.isMarketingPage) {
-    throw new Error(
-      `PINGDOM_WRONG_SCREENSHOT_PAGE: expected Pingdom results for ${domain}, but browser is on URL: ${state.url}, title: "${state.title}", text: "${state.text.slice(0, 180)}"`
-    );
-  }
-
-  if (!state.hasResults) {
-    throw new Error(
-      `PINGDOM_SCREENSHOT_RESULTS_NOT_VISIBLE: metrics were parsed but the visible page does not look like Pingdom results for ${domain}. URL: ${state.url}, title: "${state.title}"`
-    );
-  }
-
-  return state;
-}
-
-
-
-// ---------- Stable local Pingdom screenshot renderer ----------
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function formatPingdomMetric(value, fallback = 'N/A') {
-  const s = String(value ?? '').trim();
-  return s && s !== 'undefined' && s !== 'null' ? s : fallback;
-}
-
-function cleanPingdomToolUrl(toolUrl, domain) {
-  const base = String(toolUrl || 'https://tools.pingdom.com/').split('#')[0].replace(/\/?$/, '/');
-  return `${base}#${domain}`;
-}
-
-function getPingdomGradeClass(parsed = {}) {
-  const n = Number(parsed.gradeNumber);
-  if (!Number.isFinite(n)) return 'grade-na';
-  if (n >= 90) return 'grade-a';
-  if (n >= 80) return 'grade-b';
-  if (n >= 70) return 'grade-c';
-  if (n >= 60) return 'grade-d';
-  return 'grade-f';
-}
-
-function buildPingdomSummaryScreenshotHtml(domain, parsed = {}, meta = {}) {
-  const gradeText = formatPingdomMetric(parsed.performanceGrade || `${parsed.gradeLetter || ''} ${parsed.gradeNumber ?? ''}`.trim());
-  const gradeLetter = formatPingdomMetric(parsed.gradeLetter);
-  const gradeNumber = parsed.gradeNumber === null || parsed.gradeNumber === undefined ? 'N/A' : String(parsed.gradeNumber);
-  const loadTime = formatPingdomMetric(parsed.loadTime);
-  const pageSize = formatPingdomMetric(parsed.pageSize);
-  const requests = formatPingdomMetric(parsed.requests);
-  const generatedAt = new Date().toLocaleString('en-US', { hour12: false });
-  const liveUrl = cleanPingdomToolUrl(meta.loadedToolUrl, domain);
-  const finalUrl = formatPingdomMetric(meta.finalUrl || liveUrl);
-  const note = meta.sourceNote || 'Screenshot generated from the parsed Pingdom result values. This avoids SolarWinds legal-page redirects during automated screenshot capture.';
-
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Pingdom Result - ${escapeHtml(domain)}</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: #f4f6f8; color: #17212b; }
-  .top { background: #ffea00; min-height: 220px; padding: 26px 46px 32px; position: relative; }
-  .brand { font-weight: 700; font-size: 22px; letter-spacing: .2px; color: #111; }
-  .brand span { color: #e24b25; }
-  h1 { margin: 30px 0 8px; text-align: center; font-size: 36px; font-weight: 500; }
-  .subtitle { text-align: center; font-size: 15px; }
-  .form { max-width: 980px; margin: 22px auto 0; display: grid; grid-template-columns: 1fr 320px 170px; gap: 12px; align-items: end; }
-  label { display: block; font-size: 11px; color: #333; margin-bottom: 5px; }
-  .input, .select { background: white; border: 1px solid #d4d4d4; border-radius: 2px; height: 38px; padding: 9px 12px; font-size: 14px; }
-  .button { background: #38a935; color: white; border-radius: 2px; height: 38px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; letter-spacing: .3px; }
-  .wrap { max-width: 1064px; margin: 0 auto; padding: 38px 30px 50px; }
-  .results-title { font-size: 28px; font-weight: 300; margin-bottom: 18px; }
-  .panel { display: grid; grid-template-columns: 330px 1fr; gap: 18px; }
-  .preview { height: 232px; background: #fff; border: 1px solid #d9dee4; display: flex; align-items: center; justify-content: center; color: #8a95a0; font-size: 18px; }
-  .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; border: 1px solid #d9dee4; background: white; }
-  .card { min-height: 116px; border-right: 1px solid #d9dee4; border-bottom: 1px solid #d9dee4; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  .card:nth-child(2n) { border-right: 0; }
-  .card:nth-child(n+3) { border-bottom: 0; }
-  .label { font-size: 13px; color: #535f6b; margin-bottom: 6px; }
-  .value { font-size: 30px; font-weight: 700; }
-  .grade-row { display: flex; align-items: center; gap: 8px; }
-  .badge { width: 28px; height: 28px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; color: white; font-weight: 700; }
-  .grade-a { background: #2ebd59; }
-  .grade-b { background: #7bc043; }
-  .grade-c { background: #f4b400; }
-  .grade-d { background: #f87c00; }
-  .grade-f, .grade-na { background: #e84d4d; }
-  .section { margin-top: 30px; background: white; border: 1px solid #d9dee4; }
-  .section h2 { margin: 0; padding: 14px 18px; font-size: 19px; font-weight: 500; border-bottom: 1px solid #d9dee4; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 11px 18px; border-bottom: 1px solid #edf0f2; font-size: 14px; }
-  th { color: #6c7884; font-size: 12px; text-transform: uppercase; }
-  tr:last-child td { border-bottom: 0; }
-  .status-ok { color: #259b45; font-weight: 700; }
-  .status-note { color: #6c7884; }
-  .footer { margin-top: 22px; color: #5f6b76; font-size: 13px; line-height: 1.5; }
-  .url { color: #007c91; word-break: break-all; }
-</style>
-</head>
-<body>
-  <div class="top">
-    <div class="brand"><span>SolarWinds</span> Pingdom</div>
-    <h1>Pingdom Website Speed Test</h1>
-    <div class="subtitle">Enter a URL to test the page load time, analyze it, and find bottlenecks.</div>
-    <div class="form">
-      <div><label>URL</label><div class="input">https://${escapeHtml(domain)}</div></div>
-      <div><label>Test from</label><div class="select">${escapeHtml(getWantedLocation())}</div></div>
-      <div class="button">START TEST</div>
-    </div>
-  </div>
-
-  <div class="wrap">
-    <div class="results-title">Your Results:</div>
-    <div class="panel">
-      <div class="preview">${escapeHtml(domain)}</div>
-      <div class="cards">
-        <div class="card">
-          <div class="label">Performance grade</div>
-          <div class="grade-row"><span class="badge ${getPingdomGradeClass(parsed)}">${escapeHtml(gradeLetter)}</span><span class="value">${escapeHtml(gradeNumber)}</span></div>
-        </div>
-        <div class="card"><div class="label">Page size</div><div class="value">${escapeHtml(pageSize)}</div></div>
-        <div class="card"><div class="label">Load time</div><div class="value">${escapeHtml(loadTime)}</div></div>
-        <div class="card"><div class="label">Requests</div><div class="value">${escapeHtml(requests)}</div></div>
-      </div>
-    </div>
-
-    <div class="section">
-      <h2>Pingdom Summary</h2>
-      <table>
-        <tr><th>Metric</th><th>Value</th></tr>
-        <tr><td>Grade</td><td>${escapeHtml(gradeText)}</td></tr>
-        <tr><td>Load Time</td><td>${escapeHtml(loadTime)}</td></tr>
-        <tr><td>Page Size</td><td>${escapeHtml(pageSize)}</td></tr>
-        <tr><td>Requests</td><td>${escapeHtml(requests)}</td></tr>
-        <tr><td>Status</td><td class="status-ok">Result values captured successfully</td></tr>
-      </table>
-    </div>
-
-    <div class="section">
-      <h2>Capture Details</h2>
-      <table>
-        <tr><th>Field</th><th>Value</th></tr>
-        <tr><td>Domain</td><td>${escapeHtml(domain)}</td></tr>
-        <tr><td>Generated</td><td>${escapeHtml(generatedAt)}</td></tr>
-        <tr><td>Live Result URL</td><td class="url">${escapeHtml(liveUrl)}</td></tr>
-        <tr><td>Browser Final URL Before Local Render</td><td class="url">${escapeHtml(finalUrl)}</td></tr>
-        <tr><td>Screenshot Mode</td><td class="status-note">Local rendered report from parsed Pingdom metrics</td></tr>
-      </table>
-    </div>
-
-    <div class="footer">${escapeHtml(note)}</div>
-  </div>
-</body>
-</html>`;
-}
-
-async function createPingdomSummaryScreenshot(page, screenshotPath, domain, parsed, meta = {}) {
-  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
-  const html = buildPingdomSummaryScreenshotHtml(domain, parsed, meta);
-  await page.setViewport({ width: PINGDOM_VIEWPORT_WIDTH, height: PINGDOM_VIEWPORT_HEIGHT, deviceScaleFactor: 1 }).catch(() => {});
-  await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await waitForFonts(page, 10000);
-  await wait(500);
-  await page.screenshot({ path: screenshotPath, fullPage: true, type: 'png' });
-  const stat = fs.statSync(screenshotPath);
-  if (!stat || stat.size < 1000) {
-    throw new Error(`Pingdom generated screenshot too small: ${stat ? stat.size : 0} bytes`);
-  }
-  return path.basename(screenshotPath);
-}
-
-function pingdomLiveScreenshotEnabled() {
-  // User-facing requirement: pingdom.png should be the real Pingdom result page,
-  // not the local reconstructed summary image. Keep an escape hatch in .env for
-  // servers where the live page is temporarily unstable.
-  const raw = String(process.env.PINGDOM_CAPTURE_LIVE_RESULTS || '1').trim().toLowerCase();
-  return !['0', 'false', 'no', 'off', 'local'].includes(raw);
-}
-
-function pingdomLocalScreenshotFallbackEnabled() {
-  const raw = String(process.env.PINGDOM_LOCAL_SCREENSHOT_FALLBACK || '1').trim().toLowerCase();
-  return !['0', 'false', 'no', 'off'].includes(raw);
-}
-
-async function disablePingdomLegalLinks(page) {
-  try {
-    await page.evaluate(() => {
-      const badLinkRe = /(agreement|terms|privacy|legal|license|policy|conditions|service-agreement|software-services-agreement)/i;
-      for (const a of Array.from(document.querySelectorAll('a'))) {
-        const combined = [
-          a.getAttribute('href') || '',
-          a.textContent || '',
-          a.getAttribute('aria-label') || '',
-          a.getAttribute('title') || '',
-        ].join(' ');
-        if (!badLinkRe.test(combined)) continue;
-        a.dataset.fmDisabledHref = a.getAttribute('href') || '';
-        a.removeAttribute('href');
-        a.style.pointerEvents = 'none';
-        a.addEventListener('click', (ev) => {
-          ev.preventDefault();
-          ev.stopImmediatePropagation();
-          return false;
-        }, true);
-      }
-    });
-  } catch (_) {}
-}
-
-async function waitForPingdomScreenshotResultsVisible(page, domain, timeoutMs = 45000) {
-  const started = Date.now();
-  let lastState = null;
-
-  while (Date.now() - started < timeoutMs) {
-    lastState = await getPingdomPageState(page);
-    if (lastState.hasResults && !lastState.isAgreementPage && !lastState.isMarketingPage) {
-      return lastState;
-    }
+    await waitForFonts(tab, 15000);
     await wait(2000);
-  }
-
-  return lastState || await getPingdomPageState(page);
-}
-
-async function restorePingdomResultsForLiveScreenshot(page, domain, meta = {}) {
-  let state = await getPingdomPageState(page);
-
-  if (state.hasResults && !state.isAgreementPage && !state.isMarketingPage) {
-    return state;
-  }
-
-  // If a generic clicker or SolarWinds page logic moved the browser to the legal
-  // agreement page after metrics were parsed, try browser history first. This is
-  // fastest and usually restores the exact results DOM.
-  for (let i = 0; i < 2; i++) {
-    if (!(state.isAgreementPage || state.isMarketingPage)) break;
-    console.warn(`[pingdom] Live screenshot page moved away from results for ${domain}; trying goBack() from ${state.url}`);
-    try {
-      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 45000 });
-      await wait(3000);
-      await waitForFonts(page, 10000);
-      await disablePingdomLegalLinks(page);
-      state = await waitForPingdomScreenshotResultsVisible(page, domain, 15000);
-      if (state.hasResults && !state.isAgreementPage && !state.isMarketingPage) {
-        return state;
-      }
-    } catch (err) {
-      console.warn(`[pingdom] goBack() restore failed for ${domain}: ${err.message}`);
-      state = await getPingdomPageState(page);
-    }
-  }
-
-  // Second option: reload the Pingdom hash URL. On many Pingdom result pages the
-  // hash form can rehydrate the recent result. If it does not, we do not save the
-  // wrong page; caller will fall back to local screenshot or return no screenshot.
-  const restoreUrl = cleanPingdomToolUrl(meta.loadedToolUrl || 'https://tools.pingdom.com/', domain);
-  console.warn(`[pingdom] Trying direct Pingdom result URL for live screenshot: ${restoreUrl}`);
-  try {
-    await page.goto(restoreUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
-    await wait(5000);
-    await waitForFonts(page, 10000);
-    await disablePingdomLegalLinks(page);
-    state = await waitForPingdomScreenshotResultsVisible(page, domain, 45000);
-    if (state.hasResults && !state.isAgreementPage && !state.isMarketingPage) {
-      return state;
-    }
-  } catch (err) {
-    console.warn(`[pingdom] Direct result URL restore failed for ${domain}: ${err.message}`);
-  }
-
-  state = await getPingdomPageState(page);
-  throw new Error(
-    `PINGDOM_LIVE_SCREENSHOT_NOT_AVAILABLE: expected live Pingdom results for ${domain}, but browser is on URL: ${state.url}, title: "${state.title}", text: "${state.text.slice(0, 180)}"`
-  );
-}
-
-async function captureLivePingdomResultsScreenshot(page, screenshotPath, domain, meta = {}) {
-  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
-
-  const state = await restorePingdomResultsForLiveScreenshot(page, domain, meta);
-  await disablePingdomLegalLinks(page);
-
-  try {
-    if (meta.debugDir) {
-      fs.writeFileSync(
-        path.join(meta.debugDir, `pingdom-live-screenshot-state-attempt-${meta.attempt || 'x'}.json`),
-        JSON.stringify(state, null, 2)
-      );
-    }
-  } catch (_) {}
-
-  // Match the old Pingdom screenshot: capture the actual browser page from the
-  // top, full-page height, at the same width used by your FileMaker image viewer.
-  await page.setViewport({
-    width: PINGDOM_VIEWPORT_WIDTH,
-    height: PINGDOM_VIEWPORT_HEIGHT,
-    deviceScaleFactor: 1,
-  }).catch(() => {});
-
-  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-  await waitForFonts(page, 10000);
-  await wait(1500);
-
-  const captured = await captureWithRetry(page, screenshotPath, {
-    width: PINGDOM_VIEWPORT_WIDTH,
-    left: 0,
-    right: 25,
-    top: 0,
-    bottom: 0,
-    minBytes: 1000,
-    settleBeforeCaptureMs: 1500,
-    retryBaseDelayMs: 4000,
-  }, PINGDOM_SCREENSHOT_RETRIES);
-
-  // Final guard: never allow the SolarWinds Agreement page to become pingdom.png.
-  const afterState = await getPingdomPageState(page);
-  if (afterState.isAgreementPage || afterState.isMarketingPage) {
-    try { fs.unlinkSync(screenshotPath); } catch (_) {}
-    throw new Error(
-      `PINGDOM_LIVE_SCREENSHOT_WRONG_PAGE_AFTER_CAPTURE: ${afterState.url}, title: "${afterState.title}"`
-    );
-  }
-
-  return captured;
-}
-
-async function capturePingdomScreenshot(page, screenshotPath, domain, parsed, meta = {}) {
-  if (pingdomLiveScreenshotEnabled()) {
-    try {
-      return await captureLivePingdomResultsScreenshot(page, screenshotPath, domain, meta);
-    } catch (ssErr) {
-      console.warn(`[pingdom] Live Pingdom screenshot failed for ${domain}: ${ssErr.message}`);
-
-      if (!pingdomLocalScreenshotFallbackEnabled()) {
-        throw ssErr;
-      }
-
-      console.warn(`[pingdom] Falling back to local metrics screenshot for ${domain}; live page was not safe to save.`);
-      return await createPingdomSummaryScreenshot(page, screenshotPath, domain, parsed, {
-        ...meta,
-        finalUrl: meta.finalUrl || (page && typeof page.url === 'function' ? page.url() : ''),
-        sourceNote: `Live Pingdom screenshot was not available (${ssErr.message}). Local screenshot generated from parsed Pingdom metrics so the Agreement page is not saved.`,
-      });
-    }
-  }
-
-  return await createPingdomSummaryScreenshot(page, screenshotPath, domain, parsed, meta);
-}
-
-// ---------- Single attempt function (retryable) ----------
-async function runPingdomOnce(domain, context, attempt) {
-  const { paths } = context;
-  const debugDir = paths.domainDir;
-  const screenshotPath = path.join(paths.imagesDir, 'pingdom.png');
-  const errorScreenshotPath = path.join(paths.imagesDir, `pingdom-error-attempt-${attempt}.png`);
-  let tab = null;
-  let ownedBrowser = null;
-  let loadedToolUrl = 'https://tools.pingdom.com/';
-
-  try {
-    const created = await createPingdomTab(context);
-    tab = created.tab;
-    ownedBrowser = created.ownedBrowser;
-
-    const loaded = await loadPingdomToolShell(tab, domain, debugDir, attempt);
-    loadedToolUrl = loaded.toolUrl || loadedToolUrl;
 
     await fillPingdomUrl(tab, domain);
     await setPingdomLocation(tab);
@@ -1466,10 +855,25 @@ async function runPingdomOnce(domain, context, attempt) {
     await waitForFonts(tab, 10000);
     await wait(3000);
 
-    // Wait for stable/partial metrics before taking the final screenshot.
-    // This avoids saving a blank/loading Pingdom image as the final result.
-    let parsedMetrics = await waitForStableOrPartialPingdomMetrics(tab, domain, getPingdomStableMetricsWaitMs());
+    // ── SCREENSHOT FIRST ──────────────────────────────────────────────────
+    const screenshotFile = await captureWithRetry(tab, screenshotPath, {
+      width: PINGDOM_VIEWPORT_WIDTH,
+      left: 0,
+      right: 25,
+      top: 0,
+      bottom: 0,
+      minBytes: 1000,
+      settleBeforeCaptureMs: 2000,
+      retryBaseDelayMs: 5000,
+    }, PINGDOM_SCREENSHOT_RETRIES).catch((ssErr) => {
+      console.warn(`[pingdom] Screenshot failed for ${domain} (attempt ${attempt}): ${ssErr.message}`);
+      return '';
+    });
+
+    // ── WAIT FOR STABLE OR PARTIAL METRICS ────────────────────────────────
+    let parsedMetrics = await waitForStableOrPartialPingdomMetrics(tab, domain, 150000);
     if (!parsedMetrics) {
+      // ultimate fallback: try text parsing one more time
       const pageText = await tab.evaluate(() => document.body.innerText || '').catch(() => '');
       if (pageText) {
         parsedMetrics = parsePingdomText(pageText);
@@ -1481,6 +885,8 @@ async function runPingdomOnce(domain, context, attempt) {
       }
     }
 
+    await wait(1000);
+
     const finalVisibleParsed = await extractPingdomVisibleMetrics(tab).catch(() => null);
     const pageText = await tab.evaluate(() => document.body.innerText || '');
     const textParsed = parsePingdomText(pageText);
@@ -1488,6 +894,7 @@ async function runPingdomOnce(domain, context, attempt) {
     let parsed = mergePingdomData(finalVisibleParsed, parsedMetrics);
     parsed = mergePingdomData(parsed, textParsed);
 
+    // Final validation: we must have at least a grade (letter or number)
     if (parsed.gradeLetter === 'N/A' && parsed.gradeNumber === null) {
       throw new Error('Pingdom: grade completely missing after all extraction attempts');
     }
@@ -1502,22 +909,12 @@ async function runPingdomOnce(domain, context, attempt) {
       console.warn(`[pingdom] Partial data for ${domain} — missing: ${missing.join(', ')} (proceeding with available data)`);
     }
 
+    // Additional sanity for request count
     if (parsed.requests !== 'N/A' && Number(parsed.requests) > 1000) {
       const textReq = normalizeRequestCount(textParsed.requests);
       if (textReq !== 'N/A') parsed.requests = textReq;
       else parsed.requests = 'N/A';
     }
-
-    const screenshotFile = await capturePingdomScreenshot(tab, screenshotPath, domain, parsed, {
-      debugDir,
-      attempt,
-      loadedToolUrl,
-      finalUrl: tab.url ? tab.url() : loadedToolUrl,
-      sourceNote: 'Screenshot generated automatically after Pingdom metrics were extracted and before CSV export.'
-    }).catch((ssErr) => {
-      console.warn(`[pingdom] Screenshot generation failed for ${domain} (attempt ${attempt}): ${ssErr.message}`);
-      return '';
-    });
 
     try {
       fs.writeFileSync(path.join(debugDir, `pingdom-rendered-text-attempt-${attempt}.txt`), pageText || '');
@@ -1525,8 +922,6 @@ async function runPingdomOnce(domain, context, attempt) {
         finalVisibleParsed,
         textParsed,
         finalParsed: parsed,
-        loadedToolUrl,
-        finalUrl: tab.url(),
       }, null, 2));
       fs.writeFileSync(path.join(debugDir, `pingdom-parsed-attempt-${attempt}.json`), JSON.stringify(parsed, null, 2));
     } catch (_) {}
@@ -1536,7 +931,7 @@ async function runPingdomOnce(domain, context, attempt) {
       data: parsed,
       error: null,
       errorCode: null,
-      url: cleanPingdomToolUrl(loadedToolUrl, domain),
+      url: tab.url(),
       screenshot: screenshotFile || '',
     };
   } catch (err) {
@@ -1544,26 +939,35 @@ async function runPingdomOnce(domain, context, attempt) {
 
     try {
       if (tab) {
-        await captureWithRetry(tab, errorScreenshotPath, {
-          width: PINGDOM_VIEWPORT_WIDTH,
-          left: 0,
-          right: 0,
-          top: 0,
-          bottom: 0,
-          minBytes: 1000,
-        }, 2).catch(() => {});
+        if (!fs.existsSync(screenshotPath)) {
+          await captureWithRetry(tab, errorScreenshotPath, {
+            width: PINGDOM_VIEWPORT_WIDTH,
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            minBytes: 1000,
+          }, 2).catch(() => {});
+
+          try {
+            if (fs.existsSync(errorScreenshotPath)) {
+              fs.copyFileSync(errorScreenshotPath, screenshotPath);
+            }
+          } catch (_) {}
+        }
 
         const html = await tab.content().catch(() => '');
-        if (html) fs.writeFileSync(path.join(debugDir, `pingdom-error-attempt-${attempt}.html`), html);
-
-        const errorText = await tab.evaluate(() => document.body.innerText || '').catch(() => '');
-        if (errorText) fs.writeFileSync(path.join(debugDir, `pingdom-error-text-attempt-${attempt}.txt`), errorText);
+        if (html) {
+          fs.writeFileSync(path.join(debugDir, `pingdom-error-attempt-${attempt}.html`), html);
+        }
       }
     } catch (_) {}
 
-    // Last-chance extraction: if Pingdom rendered results but a later step failed,
-    // recover the visible metrics and return success. Do not copy error screenshots
-    // to pingdom.png unless valid metrics exist.
+    const existingScreenshot = fs.existsSync(screenshotPath) ? path.basename(screenshotPath) : '';
+
+    // Last-chance extraction: sometimes the Pingdom page visibly contains results,
+    // but the service throws during a later stability/screenshot step. In that case,
+    // do NOT throw away the visible metrics and import N/A into FileMaker.
     try {
       if (tab) {
         const visibleParsed = await extractPingdomVisibleMetrics(tab).catch(() => null);
@@ -1574,28 +978,16 @@ async function runPingdomOnce(domain, context, attempt) {
 
         if (!isPingdomAllNA(recovered) && (recovered.gradeLetter !== 'N/A' || recovered.gradeNumber !== null)) {
           console.warn(`[pingdom] Recovered visible results for ${domain} after error: ${JSON.stringify(recovered)}`);
-          const screenshotFile = await capturePingdomScreenshot(tab, screenshotPath, domain, recovered, {
-            debugDir,
-            attempt,
-            loadedToolUrl,
-            finalUrl: tab.url ? tab.url() : loadedToolUrl,
-            sourceNote: 'Screenshot generated from recovered Pingdom metrics after the live page moved away from the results view.'
-          }).catch((ssErr) => {
-            console.warn(`[pingdom] Recovered screenshot generation failed for ${domain}: ${ssErr.message}`);
-            return '';
-          });
-
           try {
             fs.writeFileSync(path.join(debugDir, `pingdom-recovered-visible-attempt-${attempt}.json`), JSON.stringify(recovered, null, 2));
           } catch (_) {}
-
           return {
             status: 'SUCCESS',
             data: recovered,
             error: null,
             errorCode: null,
-            url: cleanPingdomToolUrl(loadedToolUrl, domain),
-            screenshot: screenshotFile || '',
+            url: tab.url ? tab.url() : 'https://tools.pingdom.com/',
+            screenshot: existingScreenshot,
           };
         }
       }
@@ -1605,25 +997,30 @@ async function runPingdomOnce(domain, context, attempt) {
 
     return {
       status: 'FAILED',
-      data: pingdomEmptyData(),
+      data: {
+        performanceGrade: 'N/A',
+        gradeLetter: 'N/A',
+        gradeNumber: null,
+        loadTime: 'N/A',
+        pageSize: 'N/A',
+        requests: 'N/A',
+      },
       error: err.message,
       errorCode: getErrorCode({ error: err.message }),
-      url: loadedToolUrl,
-      screenshot: '',
+      url: 'https://tools.pingdom.com/',
+      screenshot: existingScreenshot,
     };
   } finally {
     if (tab) await tab.close().catch(() => {});
-    if (ownedBrowser) await ownedBrowser.close().catch(() => {});
   }
 }
 
 // ---------- Main exported function (with retry loop) ----------
 async function runPingdom(domain, context) {
   let lastError = '';
-  const maxAttempts = getMaxPingdomRetries();
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    console.log(`[pingdom] Attempt ${attempt}/${maxAttempts} for ${domain}`);
+  for (let attempt = 1; attempt <= MAX_PINGDOM_RETRIES; attempt++) {
+    console.log(`[pingdom] Attempt ${attempt}/${MAX_PINGDOM_RETRIES} for ${domain}`);
 
     const result = await runPingdomOnce(domain, context, attempt);
 
@@ -1633,14 +1030,14 @@ async function runPingdom(domain, context) {
 
     lastError = result && result.error ? result.error : 'Unknown Pingdom error';
 
-    if (attempt < maxAttempts) {
+    if (attempt < MAX_PINGDOM_RETRIES) {
       const retryDelay = attempt === 1 ? 45000 : 60000;
       console.log(`[pingdom] Retry in ${retryDelay / 1000}s for ${domain}: ${lastError}`);
       await wait(retryDelay);
     }
   }
 
-  console.error(`[pingdom] Failed after ${maxAttempts} attempts for ${domain}: ${lastError}`);
+  console.error(`[pingdom] Failed after ${MAX_PINGDOM_RETRIES} attempts for ${domain}: ${lastError}`);
   return pingdomNAResult(lastError);
 }
 

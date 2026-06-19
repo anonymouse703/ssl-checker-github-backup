@@ -4,23 +4,48 @@ const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 
-function runCommand(command, args = []) {
+function getCommandTimeoutMs() {
+  const raw = process.env.IMAGE_SYNC_COMMAND_TIMEOUT_MS || process.env.IMAGE_SYNC_TIMEOUT_MS || "120000";
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 120000;
+}
+
+function runCommand(command, args = [], options = {}) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeoutMs || getCommandTimeoutMs();
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+
+    const killTimer = setTimeout(() => {
+      try { child.kill("SIGTERM"); } catch (_) {}
+      setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch (_) {}
+      }, 3000);
+      finish(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
 
     child.stdout.on("data", (d) => { stdout += String(d); });
     child.stderr.on("data", (d) => { stderr += String(d); });
 
-    child.on("error", reject);
+    child.on("error", (err) => finish(err));
 
     child.on("close", (code) => {
+      if (settled) return;
       if (code === 0) {
-        resolve({ stdout, stderr });
+        finish(null, { stdout, stderr });
       } else {
-        reject(new Error(`${command} exited with code ${code}: ${stderr || stdout}`));
+        finish(new Error(`${command} exited with code ${code}: ${stderr || stdout}`));
       }
     });
   });
@@ -52,12 +77,28 @@ async function runRemoteSSH(sshCmd, remoteUser, remoteHost, remoteCommand) {
 }
 
 async function syncDomainImages(domainDir, domain) {
-  const imagesDir = path.join(domainDir, "images");
   const enabled = String(process.env.IMAGE_SYNC_ENABLED || "false").toLowerCase() === "true";
 
   if (!enabled) {
     return { skipped: true, reason: "IMAGE_SYNC_ENABLED is false" };
   }
+
+  // Guard against undefined/null paths so image sync cannot crash the scanner.
+  // index.js passes the per-domain directory; if an older audit-paths.js build
+  // does not provide domainDir, we skip cleanly instead of throwing
+  // ERR_INVALID_ARG_TYPE: The "path" argument must be of type string.
+  if (!domainDir || typeof domainDir !== "string") {
+    return {
+      skipped: true,
+      reason: `Missing local domain directory for image sync: ${String(domainDir)}`,
+      domain: normalizeDomain(domain),
+    };
+  }
+
+  const resolvedDomainDir = path.resolve(domainDir);
+  const imagesDir = path.basename(resolvedDomainDir) === "images"
+    ? resolvedDomainDir
+    : path.join(resolvedDomainDir, "images");
 
   if (!fs.existsSync(imagesDir)) {
     console.log(`[sync-images] No images folder found at: ${imagesDir}`);
@@ -102,8 +143,17 @@ async function syncDomainImages(domainDir, domain) {
     };
   }
 
-  // Build SSH command
-  const sshParts = ["ssh", "-p", sshPort, "-o", "StrictHostKeyChecking=no"];
+  // Build SSH command. BatchMode avoids password prompts that can hang a queue.
+  const sshConnectTimeoutSec = parseInt(process.env.IMAGE_SYNC_CONNECT_TIMEOUT_SEC || "20", 10);
+  const sshParts = [
+    "ssh",
+    "-p", sshPort,
+    "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", `ConnectTimeout=${Number.isFinite(sshConnectTimeoutSec) && sshConnectTimeoutSec > 0 ? sshConnectTimeoutSec : 20}`,
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=2",
+  ];
   if (sshKeyPath) sshParts.push("-i", sshKeyPath);
   const sshCmd = sshParts.join(" ");
 
@@ -119,10 +169,16 @@ async function syncDomainImages(domainDir, domain) {
     await runRemoteSSH(sshCmd, remoteUser, remoteHost, mkdirRemoteCommand);
     console.log(`[sync-images] Created remote directory: ${remoteDomainDir}`);
 
-    // Sync fresh images
-    // --checksum helps ensure overwrite happens even if timestamps/sizes are misleading.
+    // Sync fresh images.
+    // --checksum : overwrite remote file if content differs (not just timestamp/size).
+    // --delete   : remove remote files no longer present locally, so a re-scan fully
+    //              replaces the previous set with no leftover screenshots from tools
+    //              that weren't run this time (e.g. old pingdom.png when Pingdom was
+    //              excluded from the re-scan).
     const rsyncPath = useSudoRsync ? `--rsync-path='sudo rsync'` : "";
-    const rsyncCmd = `rsync -avz --checksum ${rsyncPath} -e "${sshCmd}" "${imagesDir}/" "${remoteUser}@${remoteHost}:${remoteDomainDir}/"`;
+    const rsyncIoTimeoutSec = parseInt(process.env.IMAGE_SYNC_RSYNC_IO_TIMEOUT_SEC || "60", 10);
+    const rsyncTimeout = Number.isFinite(rsyncIoTimeoutSec) && rsyncIoTimeoutSec > 0 ? rsyncIoTimeoutSec : 60;
+    const rsyncCmd = `rsync -avz --checksum --delete --timeout=${rsyncTimeout} ${rsyncPath} -e "${sshCmd}" "${imagesDir}/" "${remoteUser}@${remoteHost}:${remoteDomainDir}/"`;
 
     await runCommand("bash", ["-lc", rsyncCmd]);
     console.log(`[sync-images] ✅ Rsync complete for ${safeDomain}`);
@@ -140,6 +196,33 @@ async function syncDomainImages(domainDir, domain) {
 
     console.log(`[sync-images] Remote files after sync: ${remoteFiles.join(", ")}`);
 
+    // Delete local image files now that they are confirmed on the remote server.
+    // Only delete files that actually made it across — if a file is missing from
+    // remoteFiles for any reason, leave it in place so it can be re-synced.
+    const deleted = [];
+    const notDeleted = [];
+    for (const localFile of localFiles) {
+      if (remoteFiles.includes(localFile)) {
+        try {
+          fs.unlinkSync(path.join(imagesDir, localFile));
+          deleted.push(localFile);
+        } catch (delErr) {
+          console.warn(`[sync-images] ⚠️  Could not delete local file ${localFile}: ${delErr.message}`);
+          notDeleted.push(localFile);
+        }
+      } else {
+        console.warn(`[sync-images] ⚠️  ${localFile} not found on remote — keeping local copy`);
+        notDeleted.push(localFile);
+      }
+    }
+
+    if (deleted.length > 0) {
+      console.log(`[sync-images] 🗑️  Deleted ${deleted.length} local image(s): ${deleted.join(", ")}`);
+    }
+    if (notDeleted.length > 0) {
+      console.warn(`[sync-images] ⚠️  Kept ${notDeleted.length} local image(s) not confirmed on remote: ${notDeleted.join(", ")}`);
+    }
+
     return {
       success: true,
       remoteHost,
@@ -149,10 +232,24 @@ async function syncDomainImages(domainDir, domain) {
       imageCount: localFiles.length,
       localFiles,
       remoteFiles,
+      deletedLocal: deleted,
+      keptLocal: notDeleted,
     };
   } catch (err) {
     console.error(`[sync-images] ❌ Failed to sync images for ${safeDomain}:`, err.message);
-    throw err;
+    return {
+      success: false,
+      skipped: false,
+      reason: err.message,
+      error: err.message,
+      remoteHost,
+      remoteDomainDir,
+      domain: safeDomain,
+      baseUrl: remoteBaseUrl,
+      imageCount: localFiles.length,
+      localFiles,
+      remoteFiles: [],
+    };
   }
 }
 

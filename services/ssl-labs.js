@@ -4,6 +4,7 @@ const { httpGet } = require('../utils/http');
 const { getErrorCode } = require('../utils/error-codes');
 const { TIMEOUTS, GRADE_ORDER, ENDPOINTS, SSL_LABS } = require('../config/constants');
 const path = require('path');
+const fs = require('fs');
 const {
   setFixedViewport,
   captureViewportWidthFullHeight,
@@ -35,6 +36,92 @@ async function runSSLLabs(domain, context) {
   const SSL_BROWSER_MAX_WAIT_MS = envInt('SSL_LABS_BROWSER_MAX_WAIT_MS', TIMEOUTS.SSL_BROWSER);
   const SSL_SCREENSHOT_POLL_MS = envInt('SSL_LABS_SCREENSHOT_POLL_MS', 3000);
   const SSL_FINAL_SETTLE_MS = envInt('SSL_LABS_FINAL_SETTLE_MS', 2000);
+  const SSL_SCREENSHOT_MIN_BYTES = envInt('SSL_LABS_SCREENSHOT_MIN_BYTES', 1000);
+
+  const screenshotFileIsUsable = () => {
+    try {
+      return fs.existsSync(screenshotPath) && fs.statSync(screenshotPath).size >= SSL_SCREENSHOT_MIN_BYTES;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const escapeHtml = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
+  async function ensureScreenshotFile(sslParsedData, sourceLabel = 'SSL Labs result') {
+    if (screenshotFileIsUsable()) return 'ssl.png';
+
+    // Non-fatal visual fallback: API values can succeed while the SSL Labs web
+    // page screenshot fails or never writes a valid PNG. FileMaker expects a
+    // URL for ssl.png, so create a real PNG summary instead of returning a
+    // missing file. This keeps SSL values and screenshot URL consistent.
+    const tab = await newTab();
+    try {
+      const summary = sslParsedData?.summary || {};
+      const endpoints = Array.isArray(sslParsedData?.endpoints) ? sslParsedData.endpoints : [];
+      const rows = endpoints.length
+        ? endpoints.map((ep) => `
+          <tr>
+            <td>${escapeHtml(ep.ipAddress || '')}</td>
+            <td>${escapeHtml(ep.grade || 'N/A')}</td>
+            <td>${escapeHtml(ep.statusMessage || '')}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="3">No endpoint rows returned by SSL Labs.</td></tr>';
+
+      await tab.setViewport({ width: SSLLABS_VIEWPORT_WIDTH, height: SSLLABS_VIEWPORT_HEIGHT, deviceScaleFactor: 1 }).catch(() => {});
+      await tab.setContent(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SSL Labs Summary - ${escapeHtml(domain)}</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 34px; color: #1f2937; background: #f8fafc; }
+    .card { background:#fff; border:1px solid #d9e2ec; border-radius:14px; padding:28px; box-shadow:0 8px 28px rgba(15,23,42,.08); }
+    .brand { font-size:28px; font-weight:700; color:#173f5f; margin-bottom:8px; }
+    .domain { font-size:22px; margin-bottom:24px; color:#334155; }
+    .grade { display:inline-block; font-size:54px; font-weight:800; color:#0f766e; border:3px solid #0f766e; border-radius:16px; padding:10px 24px; margin:12px 0 22px; }
+    .meta { font-size:16px; line-height:1.8; margin-bottom:22px; }
+    table { border-collapse:collapse; width:100%; font-size:15px; }
+    th,td { border:1px solid #cbd5e1; padding:10px 12px; text-align:left; }
+    th { background:#e2e8f0; }
+    .note { margin-top:22px; font-size:13px; color:#64748b; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">SSL Labs Result</div>
+    <div class="domain">${escapeHtml(domain)}</div>
+    <div>Overall Grade</div>
+    <div class="grade">${escapeHtml(sslParsedData?.overallGrade || 'N/A')}</div>
+    <div class="meta">
+      Status: <b>${escapeHtml(sslParsedData?.status || 'READY')}</b><br>
+      Endpoints: <b>${escapeHtml(summary.totalEndpoints ?? endpoints.length ?? 0)}</b><br>
+      All Grades: <b>${escapeHtml(summary.allGrades || 'N/A')}</b><br>
+      Source: ${escapeHtml(sourceLabel)}
+    </div>
+    <table>
+      <thead><tr><th>IP Address</th><th>Grade</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="note">Generated automatically because the SSL Labs web-page screenshot did not produce a usable ssl.png file.</div>
+  </div>
+</body>
+</html>`, { waitUntil: 'load' });
+      await wait(500);
+      await tab.screenshot({ path: screenshotPath, fullPage: true });
+      return screenshotFileIsUsable() ? 'ssl.png' : null;
+    } catch (err) {
+      console.error(`[ssl-labs] ensureScreenshotFile failed for ${domain}: ${err.message}`);
+      return null;
+    } finally {
+      await tab.close().catch(() => {});
+    }
+  }
 
   const isRealGrade = (grade) => /^(A\+|A-|A|B|C|D|E|F|T|M)$/.test((grade || '').trim());
 
@@ -168,14 +255,21 @@ async function runSSLLabs(domain, context) {
       });
 
       return 'ssl.png';
-    } catch (_) {
-      return null;
+    } catch (err) {
+      console.error(`[ssl-labs] primary screenshot failed for ${domain}: ${err.message}`);
+      try {
+        await tab.screenshot({ path: screenshotPath, fullPage: true });
+        return 'ssl.png';
+      } catch (shotErr) {
+        console.error(`[ssl-labs] fallback screenshot also failed for ${domain}: ${shotErr.message}`);
+        return null;
+      }
     }
   }
 
   // Polls until at least ONE endpoint has a real grade, then returns immediately.
   // Does NOT wait for all endpoints — the caller handles waiting for full completion.
-  async function pollApiUntilFirstGrade(maxMs = 10 * 60 * 1000) {
+  async function pollApiUntilFirstGrade(maxMs = envInt('SSL_LABS_FIRST_GRADE_MAX_WAIT_MS', 12 * 60 * 1000)) {
     let sslData = await sslFetch(
       `${ENDPOINTS.SSL_LABS_API}?host=${domain}&startNew=on&all=done`,
       'startnew',
@@ -222,7 +316,7 @@ async function runSSLLabs(domain, context) {
   // Polls until status === READY (all endpoints fully graded).
   // No artificial time cap — uses a generous hard ceiling of 20 min to avoid
   // hanging forever on a broken scan. Screenshot is taken AFTER this returns.
-  async function pollApiUntilAllDone(maxMs = 20 * 60 * 1000) {
+  async function pollApiUntilAllDone(maxMs = envInt('SSL_LABS_ALL_DONE_MAX_WAIT_MS', 25 * 60 * 1000)) {
     const deadline = Date.now() + maxMs;
     let attempts = 0;
 
@@ -390,10 +484,48 @@ async function runSSLLabs(domain, context) {
           const tds = Array.from(row.querySelectorAll('td'));
           if (tds.length < 2) continue;
           const ip = tds[0]?.innerText?.trim() || '';
-          let grade = tds[1]?.innerText?.trim()?.split('\n')[0]?.trim() || '';
-          const gradeSpan = tds[1]?.querySelector('.grade, .rating, .score');
-          if (gradeSpan) grade = gradeSpan.innerText.trim();
+
+          // SSL Labs table is usually: Server | Test time | Grade.
+          // Older code read tds[1], which is often the test-time column.
+          let grade = '';
+          const gradeSpan = row.querySelector('.grade, .rating, .score, .letterGrade');
+          if (gradeSpan && isGrade(gradeSpan.innerText.trim())) {
+            grade = gradeSpan.innerText.trim();
+          }
+
+          if (!isGrade(grade)) {
+            for (let i = tds.length - 1; i >= 1; i--) {
+              const cellText = (tds[i]?.innerText || '').replace(/\s+/g, ' ').trim();
+              const m = cellText.match(/\b(A\+|A-|A|B|C|D|E|F|T|M)\b/);
+              if (m) {
+                grade = m[1];
+                break;
+              }
+            }
+          }
+
           if (ip && isGrade(grade)) endpoints.push({ ipAddress: ip, grade });
+        }
+
+        // Final text fallback. This catches pages where SSL Labs renders grade cells
+        // without the older endpointData structure.
+        if (endpoints.length === 0) {
+          const body = document.body ? document.body.innerText : '';
+          const tableLines = body.split('\n').map(x => x.trim()).filter(Boolean);
+          let syntheticIndex = 1;
+          for (const line of tableLines) {
+            const gradeMatch = line.match(/\b(A\+|A-|A|B|C|D|E|F|T|M)\b/);
+            const ipMatch = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-f:]{8,}\b/i);
+            if (gradeMatch && ipMatch) {
+              endpoints.push({ ipAddress: ipMatch[0], grade: gradeMatch[1] });
+            }
+          }
+          if (endpoints.length === 0) {
+            const gradeMatches = Array.from(body.matchAll(/\b(A\+|A-|A|B|C|D|E|F|T|M)\b/g)).map(m => m[1]);
+            if (gradeMatches.length > 0) {
+              endpoints.push({ ipAddress: `endpoint-${syntheticIndex++}`, grade: gradeMatches[gradeMatches.length - 1] });
+            }
+          }
         }
 
         let ratingGrade = null;
@@ -506,8 +638,15 @@ async function runSSLLabs(domain, context) {
       });
 
       return 'ssl.png';
-    } catch (_) {
-      return null;
+    } catch (err) {
+      console.error(`[ssl-labs] screenshotViaFreshTab failed for ${domain}: ${err.message}`);
+      try {
+        await tab.screenshot({ path: screenshotPath, fullPage: true });
+        return 'ssl.png';
+      } catch (shotErr) {
+        console.error(`[ssl-labs] screenshotViaFreshTab fallback also failed for ${domain}: ${shotErr.message}`);
+        return null;
+      }
     } finally {
       await tab.close().catch(() => {});
     }
@@ -522,7 +661,8 @@ async function runSSLLabs(domain, context) {
 
     if (cached && cached.status === 'READY') {
       const data = parseReady(cached);
-      const screenshot = await screenshotViaFreshTab();
+      await screenshotViaFreshTab();
+      const screenshot = await ensureScreenshotFile(data, 'SSL Labs cached result');
       return {
         status: 'SUCCESS',
         data,
@@ -535,7 +675,7 @@ async function runSSLLabs(domain, context) {
 
     // Step 1: Wait until at least the FIRST server has a grade.
     // Returns immediately when any one endpoint is graded — does not wait for all.
-    const firstGradeData = await pollApiUntilFirstGrade(10 * 60 * 1000);
+    const firstGradeData = await pollApiUntilFirstGrade();
 
     if (firstGradeData) {
       if (DEBUG) {
@@ -549,7 +689,7 @@ async function runSSLLabs(domain, context) {
         if (DEBUG) {
           console.log(`[ssl-labs] waiting for all servers to finish for ${domain}...`);
         }
-        const allDoneData = await pollApiUntilAllDone(20 * 60 * 1000);
+        const allDoneData = await pollApiUntilAllDone();
         finalData = allDoneData || firstGradeData;
         if (DEBUG) {
           console.log(`[ssl-labs] all servers done for ${domain}: ${finalData.overallGrade}`);
@@ -557,7 +697,8 @@ async function runSSLLabs(domain, context) {
       }
 
       // Step 3: Take screenshot ONLY after all servers are done so the page shows complete results.
-      const screenshot = await screenshotViaFreshTab();
+      await screenshotViaFreshTab();
+      const screenshot = await ensureScreenshotFile(finalData, 'SSL Labs final result');
 
       return {
         status: 'SUCCESS',
@@ -570,13 +711,14 @@ async function runSSLLabs(domain, context) {
     }
 
     const browserData = await runSSLLabsBrowser();
+    const browserScreenshot = await ensureScreenshotFile(browserData, 'SSL Labs browser scrape result');
     return {
       status: 'SUCCESS',
       data: browserData,
       error: null,
       errorCode: null,
       url: `${ENDPOINTS.SSL_LABS_WEB}?d=${domain}`,
-      screenshot: browserData.screenshot || null,
+      screenshot: browserScreenshot || browserData.screenshot || null,
     };
   } catch (err) {
     const msg = err instanceof AggregateError
