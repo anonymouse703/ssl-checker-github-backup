@@ -2,7 +2,46 @@
 
 const { httpGet } = require('../utils/http');
 const { getErrorCode } = require('../utils/error-codes');
-const { TIMEOUTS, GRADE_ORDER, ENDPOINTS, SSL_LABS } = require('../config/constants');
+
+// Load constants defensively. Some older index/tool installs have config/constants.js
+// with a different export shape, or a partially restored constants file. Without
+// these fallbacks, SSL Labs fails before its own try/catch with:
+// Cannot read properties of undefined (reading 'SSL_BROWSER').
+let constants = {};
+try {
+  constants = require('../config/constants') || {};
+} catch (_) {
+  constants = {};
+}
+
+const toPositiveInt = (value, fallback) => {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const rawTimeouts = constants.TIMEOUTS || {};
+const TIMEOUTS = {
+  SSL_BROWSER: toPositiveInt(rawTimeouts.SSL_BROWSER ?? constants.SSL_BROWSER, 300000),
+  SSL_API_POLL: toPositiveInt(rawTimeouts.SSL_API_POLL ?? constants.SSL_API_POLL, 15000),
+};
+
+const GRADE_ORDER = Array.isArray(constants.GRADE_ORDER) && constants.GRADE_ORDER.length
+  ? constants.GRADE_ORDER
+  : ['A+', 'A', 'A-', 'B', 'C', 'D', 'E', 'F', 'T', 'M'];
+
+const rawEndpoints = constants.ENDPOINTS || {};
+const ENDPOINTS = {
+  SSL_LABS_API: rawEndpoints.SSL_LABS_API || constants.SSL_LABS_API || 'https://api.ssllabs.com/api/v3/analyze',
+  SSL_LABS_WEB: rawEndpoints.SSL_LABS_WEB || constants.SSL_LABS_WEB || 'https://www.ssllabs.com/ssltest/analyze.html',
+};
+
+const rawSslLabs = constants.SSL_LABS || {};
+const SSL_LABS = {
+  MAX_RETRIES: toPositiveInt(rawSslLabs.MAX_RETRIES ?? constants.SSL_LABS_MAX_RETRIES, 5),
+  BASE_RETRY_DELAY: toPositiveInt(rawSslLabs.BASE_RETRY_DELAY ?? constants.SSL_LABS_BASE_RETRY_DELAY, 10000),
+  POLL_INTERVAL: toPositiveInt(rawSslLabs.POLL_INTERVAL ?? constants.SSL_LABS_POLL_INTERVAL, 5000),
+};
+
 const path = require('path');
 const fs = require('fs');
 const {

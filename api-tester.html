@@ -2,6 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <title>SSL Checker — Live Progress</title>
     <style>
       * {
@@ -193,17 +194,23 @@
         display: block;
       }
 
+      /* FileMaker 17/18 Windows Web Viewer uses the IE engine.
+         Avoid CSS grid here; use inline-block tiles so results render correctly. */
       .metric-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 8px;
         margin-top: 10px;
+        font-size: 0;
       }
       .metric {
+        display: inline-block;
+        vertical-align: top;
+        width: 23%;
+        min-width: 140px;
+        margin: 0 1% 8px 0;
         background: #f5f5f5;
         border-radius: 8px;
         padding: 10px 12px;
         border: 1px solid #e0e0e0;
+        font-size: 13px;
       }
       .metric-val {
         font-size: 18px;
@@ -387,16 +394,28 @@
         }
 
         function copyLog(ev) {
-          navigator.clipboard
-            .writeText(byId("logBox").textContent)
-            .then(function () {
-              var btn = ev.target;
-              var orig = btn.textContent;
-              btn.textContent = "Copied!";
-              setTimeout(function () {
-                btn.textContent = orig;
-              }, 1500);
-            });
+          var btn = ev && ev.target ? ev.target : null;
+          var text = byId("logBox").textContent;
+          var copied = false;
+          // navigator.clipboard not available in FM 18 (IE engine) — use execCommand
+          try {
+            var ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.top = "0";
+            ta.style.left = "0";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            copied = document.execCommand("copy");
+            document.body.removeChild(ta);
+          } catch (e) { copied = false; }
+          if (btn) {
+            var orig = btn.textContent;
+            btn.textContent = copied ? "Copied!" : "Copy failed";
+            setTimeout(function () { btn.textContent = orig; }, 1500);
+          }
         }
 
         function toggleAutoScroll(ev) {
@@ -407,27 +426,25 @@
         }
 
         function showTab(tabId, btn) {
-          document.querySelectorAll(".tab-panel").forEach(function (el) {
-            el.classList.remove("active");
-          });
-          document.querySelectorAll(".tab-btn").forEach(function (el) {
-            el.classList.remove("active");
-          });
-          byId(tabId).classList.add("active");
-          btn.classList.add("active");
+          // NodeList.forEach not supported in IE — use a regular for loop
+          var panels = document.querySelectorAll(".tab-panel");
+          var btns   = document.querySelectorAll(".tab-btn");
+          for (var i = 0; i < panels.length; i++) panels[i].className = panels[i].className.replace(/\bactive\b/, "").trim();
+          for (var j = 0; j < btns.length; j++)   btns[j].className   = btns[j].className.replace(/\bactive\b/, "").trim();
+          byId(tabId).className += " active";
+          btn.className += " active";
         }
         window.showTab = showTab;
 
         function showImgTab(key, btn) {
-          document.querySelectorAll(".img-tab-btn").forEach(function (b) {
-            b.classList.remove("active");
-          });
-          document.querySelectorAll(".img-tab-panel").forEach(function (p) {
-            p.classList.remove("active");
-          });
-          btn.classList.add("active");
+          // NodeList.forEach not supported in IE — use a regular for loop
+          var tabBtns = document.querySelectorAll(".img-tab-btn");
+          var tabPnls = document.querySelectorAll(".img-tab-panel");
+          for (var i = 0; i < tabBtns.length; i++) tabBtns[i].className = tabBtns[i].className.replace(/\bactive\b/, "").trim();
+          for (var j = 0; j < tabPnls.length; j++) tabPnls[j].className = tabPnls[j].className.replace(/\bactive\b/, "").trim();
+          btn.className += " active";
           var panel = byId("imgPanel_" + key);
-          if (panel) panel.classList.add("active");
+          if (panel) panel.className += " active";
         }
         window.showImgTab = showImgTab;
 
@@ -453,6 +470,7 @@
         function xhrGetJson(url, okFn, errFn) {
           var xhr = new XMLHttpRequest();
           xhr.open("GET", url, true);
+          xhr.timeout = 10000; // IE can hang without a timeout
           xhr.onreadystatechange = function () {
             if (xhr.readyState === 4) {
               if (xhr.status >= 200 && xhr.status < 300) {
@@ -466,18 +484,23 @@
               }
             }
           };
+          xhr.ontimeout = function () { if (errFn) errFn("timeout"); };
+          xhr.onerror   = function () { if (errFn) errFn("error"); };
           xhr.send(null);
         }
 
         function xhrGetText(url, okFn, errFn) {
           var xhr = new XMLHttpRequest();
           xhr.open("GET", url, true);
+          xhr.timeout = 10000;
           xhr.onreadystatechange = function () {
             if (xhr.readyState === 4) {
               if (xhr.status >= 200 && xhr.status < 300) okFn(xhr.responseText);
               else if (errFn) errFn(xhr.status);
             }
           };
+          xhr.ontimeout = function () { if (errFn) errFn("timeout"); };
+          xhr.onerror   = function () { if (errFn) errFn("error"); };
           xhr.send(null);
         }
 
@@ -495,6 +518,11 @@
             { key: "pagerank", label: "PageRank", url: d.PageRank_Screenshot },
             { key: "server", label: "Server", url: d.Server_Screenshot },
             { key: "intodns", label: "IntoDNS", url: d.IntoDNS_Screenshot },
+            {
+              key: "indepthdns",
+              label: "INDepthDNS",
+              url: d.InDepthDNS_Screenshot,
+            },
           ].filter(function (x) {
             return x.url && x.url !== "none" && x.url !== "";
           });
@@ -574,7 +602,19 @@
             '</div><div class="metric-lbl">Server IP</div></div>' +
             '<div class="metric"><div class="metric-val">' +
             escapeHtml(d.IntoDNS_OverallHealth || d.IntoDNS_Health || "N/A") +
-            '</div><div class="metric-lbl">IntoDNS</div></div>';
+            '</div><div class="metric-lbl">IntoDNS</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(d.InDepthDNS_OverallHealth || d.InDepthDNS_Status || "N/A") +
+            '</div><div class="metric-lbl">INDepthDNS</div></div>' +
+            '<div class="metric"><div class="metric-val">' +
+            escapeHtml(
+              (d.InDepthDNS_Pass || "0") +
+                " / " +
+                (d.InDepthDNS_Warn || "0") +
+                " / " +
+                (d.InDepthDNS_Fail || "0")
+            ) +
+            '</div><div class="metric-lbl">INDepthDNS Pass / Warn / Fail</div></div>';
 
           renderImages(d);
           byId("resultBox").textContent = JSON.stringify(d, null, 2);
@@ -598,7 +638,7 @@
             },
             function () {
               if (notReadyFn) notReadyFn();
-            },
+            }
           );
         }
 
@@ -609,7 +649,7 @@
               function () {},
               function () {
                 setText("statusText", "Missing job_id parameter");
-              },
+              }
             );
             return;
           }
@@ -643,9 +683,9 @@
                 function () {},
                 function () {
                   setText("statusText", "Cannot reach server...");
-                },
+                }
               );
-            },
+            }
           );
 
           xhrGetText(
@@ -657,7 +697,7 @@
               logBox.textContent =
                 lines.join("\n") || "(waiting for output...)";
               if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
-            },
+            }
           );
         }
 
@@ -684,8 +724,7 @@
         }
 
         function decideInitialView(domain) {
-          // ?view=result mode: skip all polling, just show stored result
-          // Used by FileMaker web viewer formula when IsScan = 1
+          // ?view=result mode: skip polling, just show stored result
           var viewMode = getParam("view");
           if (viewMode === "result") {
             byId("progressPanel").style.display = "none";
@@ -703,8 +742,14 @@
             return;
           }
 
-          // No job_id: try result first, then fall back to polling
-          if (!JOB_ID) {
+          // FM 18 compatible: skip the /status pre-check entirely.
+          // If we have a job_id, start polling immediately — the /progress
+          // endpoint will return the live state. When the scan finishes,
+          // pollStatus detects DONE and calls fetchResultIfAvailable.
+          // If no job_id, try fetching the stored result right away.
+          if (JOB_ID) {
+            startPolling(domain);
+          } else {
             fetchResultIfAvailable(
               domain,
               function () { setBadgeState("Done"); },
@@ -713,49 +758,7 @@
                 startPolling(domain);
               }
             );
-            return;
           }
-
-          // Has job_id: check if job is still actively running on the server
-          xhrGetJson(
-            API_BASE + "/status?job_id=" + encodeURIComponent(JOB_ID),
-            function (j) {
-              var runningNow =
-                j && typeof j.running !== "undefined"
-                  ? String(j.running).toLowerCase()
-                  : "";
-
-              if (runningNow === "true" || runningNow === "1") {
-                // Job is live — start live polling
-                startPolling(domain);
-              } else {
-                // Job is no longer running — try to show stored result immediately
-                // without flashing the polling UI
-                byId("progressPanel").style.display = "none";
-                fetchResultIfAvailable(
-                  domain,
-                  function () { setBadgeState("Done"); },
-                  function () {
-                    // Result not ready yet — maybe still writing, poll briefly
-                    byId("progressPanel").style.display = "block";
-                    startPolling(domain);
-                  }
-                );
-              }
-            },
-            function () {
-              // /status unreachable — try result directly
-              byId("progressPanel").style.display = "none";
-              fetchResultIfAvailable(
-                domain,
-                function () { setBadgeState("Done"); },
-                function () {
-                  byId("progressPanel").style.display = "block";
-                  startPolling(domain);
-                }
-              );
-            }
-          );
         }
 
         window.clearLog = clearLog;

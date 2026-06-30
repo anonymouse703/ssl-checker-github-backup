@@ -290,6 +290,16 @@
       var rawServers = getParam('servers') || '';
       var autoRefreshSec = parseInt(getParam('refresh') || '30', 10);
       if (!autoRefreshSec || autoRefreshSec < 5) autoRefreshSec = 30;
+
+      // Show only current monitor log entries.
+      // Default = last 60 seconds. You can override with ?log_window_seconds=120
+      // or ?log_minutes=2 in the FileMaker Web Viewer URL.
+      var rawLogWindowSeconds = parseInt(getParam('log_window_seconds') || getParam('log_seconds') || '', 10);
+      var rawLogMinutes = parseFloat(getParam('log_minutes') || '');
+      var logWindowSeconds = rawLogWindowSeconds || (rawLogMinutes ? Math.round(rawLogMinutes * 60) : 60);
+      if (!logWindowSeconds || logWindowSeconds < 10) logWindowSeconds = 60;
+      if (logWindowSeconds > 3600) logWindowSeconds = 3600;
+
       var refreshTimer = null;
 
       function esc(value) {
@@ -405,9 +415,19 @@
         return html;
       }
 
-      function renderLogs(groups) {
-        if (!groups || !groups.length) return '';
-        var html = '<div class="section-title">Recent Log Warnings / Errors</div>';
+      function formatLogWindow(seconds) {
+        seconds = parseInt(seconds || logWindowSeconds || 60, 10) || 60;
+        if (seconds < 60) return seconds + 's';
+        if (seconds % 60 === 0) return Math.round(seconds / 60) + 'm';
+        return seconds + 's';
+      }
+
+      function renderLogs(groups, windowSeconds) {
+        var winText = formatLogWindow(windowSeconds);
+        var html = '<div class="section-title">Current Log Warnings / Errors — last ' + show(winText) + '</div>';
+        if (!groups || !groups.length) {
+          return html + '<div class="log-box"><div style="color:#1a6e31;font-weight:600;">✓ No new warning/error lines in the current log window.</div></div>';
+        }
         for (var i = 0; i < groups.length && i < 4; i++) {
           var g = groups[i] || {};
           html += '<div class="log-box">' +
@@ -543,7 +563,7 @@
           renderProcessTable('Possible Stuck / Heavy Processes', d.suspect_processes) +
           renderProcessTable('Top Memory Processes', d.top_processes_by_memory) +
           renderProcessTable('Top CPU Processes', d.top_processes_by_cpu) +
-          renderLogs(d.recent_log_errors) +
+          renderLogs(d.recent_log_errors, d.recent_log_window_seconds) +
         '</div>';
       }
 
@@ -559,7 +579,9 @@
         var dot = document.getElementById('refreshDot');
         dot.className = 'refresh-dot';
 
-        var apiUrl = '/server-stats-all?servers=' + encodeURIComponent(rawServers) + '&_=' + new Date().getTime();
+        var apiUrl = '/server-stats-all?servers=' + encodeURIComponent(rawServers) +
+          '&log_window_seconds=' + encodeURIComponent(logWindowSeconds) +
+          '&_=' + new Date().getTime();
         xhrJson(apiUrl, 20000, function(err, data) {
           if (err) {
             renderMonitorError(err.message || String(err));

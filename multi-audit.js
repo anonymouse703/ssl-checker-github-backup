@@ -455,6 +455,20 @@ function makeScannerFallbackRow(domain, reason, elapsedSec) {
         IntoDNS_SOA_Serial: 'N/A',
         IntoDNS_URL: `https://intodns.com/${domain}`,
         IntoDNS_Screenshot: maybeImage(domain, 'intodns.png'),
+        InDepthDNS_Status: fallbackStatusForTool('indepthdns'),
+        InDepthDNS_Error: toolWasSelected('indepthdns') ? cleanReason : null,
+        InDepthDNS_ErrorCode: toolWasSelected('indepthdns') ? 'SCANNER_FALLBACK' : null,
+        InDepthDNS_OverallHealth: toolWasSelected('indepthdns') ? 'UNKNOWN' : 'SKIPPED',
+        InDepthDNS_All: 'N/A',
+        InDepthDNS_Pass: 'N/A',
+        InDepthDNS_Warn: 'N/A',
+        InDepthDNS_Fail: 'N/A',
+        InDepthDNS_Info: 'N/A',
+        InDepthDNS_Phase1Time: 'N/A',
+        InDepthDNS_Phase2Time: 'N/A',
+        InDepthDNS_TotalElapsed: 'N/A',
+        InDepthDNS_URL: 'https://tool.indepthdns.com/',
+        InDepthDNS_Screenshot: maybeImage(domain, 'indepthdns.png'),
     };
 }
 

@@ -84,6 +84,22 @@ setDefaultEnv('WHATSMYDNS_BROWSER_TIMEOUT_MS', '300000'); // 5 min — allow dns
 setDefaultEnv('WHATSMYDNS_SECURITY_TIMEOUT_MS', '90000'); // match dns.js security-verification wait budget
 setDefaultEnv('DNS_RESOLVER_FALLBACK_TIMEOUT_MS', '8000');
 
+// SSL Labs: outer wrapper must be larger than the sum of its internal polling windows.
+// SSL_LABS_FIRST_GRADE_MAX_WAIT_MS + SSL_LABS_ALL_DONE_MAX_WAIT_MS + screenshot + buffer.
+// 720000 + 1500000 + 300000 + 480000 = 3000000 (50 min).
+// These setDefaultEnv calls only apply when the value is NOT already in .env / PM2 config.
+setDefaultEnv('SSL_TIMEOUT_MS', '3000000');
+setDefaultEnv('SSL_LABS_BROWSER_MAX_WAIT_MS', '900000');
+setDefaultEnv('SSL_LABS_FIRST_GRADE_MAX_WAIT_MS', '720000');
+setDefaultEnv('SSL_LABS_ALL_DONE_MAX_WAIT_MS', '1500000');
+
+// INDepthDNS can run phase 1 + phase 2, so the outer wrapper needs to be longer
+// than the combined internal phase waits.
+setDefaultEnv('INDEPTHDNS_PHASE1_TIMEOUT_MS', '120000');
+setDefaultEnv('INDEPTHDNS_PHASE2_TIMEOUT_MS', '180000');
+setDefaultEnv('INDEPTHDNS_TIMEOUT_MS', '360000');
+setDefaultEnv('INDEPTHDNS_ATTEMPTS', '1');
+
 // Services
 const { runSSLLabs } = require('./services/ssl-labs');
 const { runSucuri } = require('./services/sucuri');
@@ -105,6 +121,39 @@ if (!runWhatsMyDNS) {
 const { runPageRank } = require('./services/pagerank');
 const { runServerChecks } = require('./services/server-checks');
 const { runIntoDNS } = require('./services/intodns');
+
+let runInDepthDNS = async (domainName) => ({
+  status: 'FAILED',
+  error: 'INDepthDNS service module not loaded',
+  errorCode: 'INDEPTHDNS_MODULE_MISSING',
+  data: {},
+  url: 'https://tool.indepthdns.com/',
+  screenshot: '',
+  tool: 'indepthdns',
+});
+try {
+  ({ runInDepthDNS } = require('./services/indepthdns'));
+} catch (err) {
+  console.warn(`[startup] INDepthDNS service disabled: ${err.message}`);
+}
+
+let detectWordPress = async (inputUrl) => ({
+  inputUrl,
+  checkedUrl: inputUrl,
+  finalUrl: inputUrl,
+  status: null,
+  verdict: 'unknown',
+  confidence: 'none',
+  score: 0,
+  markerCount: 0,
+  evidence: [],
+  error: 'WordPress detector module not loaded',
+});
+try {
+  ({ detectWordPress } = require('./utils/detect-wordpress'));
+} catch (err) {
+  console.warn(`[startup] WordPress detector disabled: ${err.message}`);
+}
 
 function sanitizeDomain(raw) {
   let s = String(raw || '').trim().toLowerCase();
@@ -241,6 +290,46 @@ function writeProgress(completed, total, lastDomain, finishTime, status) {
   } catch (_) {}
 }
 
+
+function safeWpFileKey(raw) {
+  return String(raw || '').replace(/[^a-z0-9._-]/gi, '_');
+}
+
+function writeWordPressEarlyResult(wordpressCheck = {}) {
+  try {
+    if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+    const wpCSV = normalizeWordPressDetectionForCSV(wordpressCheck || {});
+    const payload = {
+      domain,
+      job_id: JOB_ID,
+      IsWordPress: wpCSV.isWordPress,
+      WordPress_Verdict: wpCSV.verdict || '',
+      WordPress_Confidence: wpCSV.confidence || '',
+      WordPress_Score: wpCSV.score || 0,
+      WordPress_MarkerCount: wpCSV.markerCount || 0,
+      WordPress_Final_URL: wpCSV.finalUrl || '',
+      WordPress_Error: wpCSV.error || '',
+      WordPress_Evidence: wpCSV.evidenceText || '',
+      ready: true,
+      written_at: new Date().toISOString(),
+    };
+
+    const files = [
+      path.join(OUTPUT_DIR, `wp_${safeWpFileKey(JOB_ID)}.json`),
+      path.join(OUTPUT_DIR, `wp_${safeWpFileKey(domain)}.json`),
+    ];
+
+    for (const file of [...new Set(files)]) {
+      fs.writeFileSync(file, JSON.stringify(payload), 'utf8');
+    }
+
+    progressLog(`✅ WordPress early result written for ${domain}: ${payload.WordPress_Verdict}`);
+  } catch (wpFileErr) {
+    progressLog(`⚠️ Could not write WordPress early result: ${wpFileErr.message}`);
+  }
+}
+
 if (FRESH && fs.existsSync(paths.csvPath)) {
   try {
     fs.unlinkSync(paths.csvPath);
@@ -263,7 +352,15 @@ const ALL_TOOLS = [
   { key: 'pagerank', label: '🔍 OnePageRank' },
   { key: 'server', label: '🖥️  Server' },
   { key: 'intodns', label: '🌐 IntoDNS' },
+  { key: 'indepthdns', label: '🧭 INDepthDNS' },
 ];
+
+// Keep the legacy/default FileMaker scan set stable. INDepthDNS is available
+// only when FileMaker explicitly sends it in ENABLED_TOOLS. This prevents the
+// new tool from changing old scan timing or browser load unexpectedly.
+const DEFAULT_TOOL_KEYS = ALL_TOOLS
+  .map((t) => t.key)
+  .filter((key) => key !== 'indepthdns');
 
 function readEnabledTools() {
   try {
@@ -271,7 +368,7 @@ function readEnabledTools() {
     const parsed = JSON.parse(raw);
 
     if (!Array.isArray(parsed) || !parsed.length) {
-      return ALL_TOOLS.map((t) => t.key);
+      return DEFAULT_TOOL_KEYS;
     }
 
     const allowed = new Set(ALL_TOOLS.map((t) => t.key));
@@ -279,7 +376,7 @@ function readEnabledTools() {
       .map((v) => String(v || '').trim().toLowerCase())
       .filter((v) => allowed.has(v));
   } catch (_) {
-    return ALL_TOOLS.map((t) => t.key);
+    return DEFAULT_TOOL_KEYS;
   }
 }
 
@@ -368,6 +465,11 @@ function toolTimeoutMs(key) {
   const normalizedKey = String(key || '').toLowerCase();
   const perToolKey = `${normalizedKey.toUpperCase()}_TIMEOUT_MS`;
   const defaultByTool = {
+    // SSL outer wrapper must exceed the combined internal polling budget:
+    // SSL_LABS_FIRST_GRADE_MAX_WAIT_MS (12 min) + SSL_LABS_ALL_DONE_MAX_WAIT_MS (25 min)
+    // + screenshotViaFreshTab overhead (~5 min) + buffer (~5 min) = ~47 min.
+    // Set SSL_TIMEOUT_MS in .env to override. Default: 50 min.
+    ssl: '3000000',
     pingdom: '1980000', // Pingdom's own internal retry loop can need ~31.75 min worst case; give it room.
     dns: '330000',       // Includes browser scrape (up to 300000ms) plus index resolver fallback.
   };
@@ -1129,6 +1231,7 @@ function readHttpBodySnippet(url, timeoutMs = 10000, redirectLimit = 3) {
             statusText: res.statusMessage || '',
             title,
             bodySnippet: bodyText,
+            rawHtml: body,
             parkedFailure: detectParkedOrExpiredText(`${title} ${bodyText}`),
           });
         });
@@ -1364,6 +1467,15 @@ function makeFatalDomainResults(domainName, failure) {
       data: { overallHealth: 'N/A', errorCount: 'N/A', warnCount: 'N/A', mxStatus: 'N/A', nsCount: 'N/A', soaSerial: 'N/A' },
       url: `https://intodns.com/${domainName}`,
     },
+    indepthdns: {
+      status: statusFor('indepthdns'), error: errFor('indepthdns'), errorCode: codeFor('indepthdns'), screenshot: '',
+      data: {
+        overallHealth: 'N/A',
+        counts: { all: 'N/A', pass: 'N/A', warn: 'N/A', fail: 'N/A', info: 'N/A' },
+        timing: { phase1: 'N/A', phase2: 'N/A', total: 'N/A' },
+      },
+      url: 'https://tool.indepthdns.com/',
+    },
   };
 }
 
@@ -1406,6 +1518,7 @@ function getResultScreenshotFilenames(results) {
     results.pingdom?.screenshot,
     results.whatsmydns?.screenshot,
     results.intodns?.screenshot,
+    results.indepthdns?.screenshot,
   ]
     .filter(isRealScreenshotValue)
     .map((v) => path.basename(String(v).split('?')[0]));
@@ -1466,6 +1579,7 @@ function clearMissingLocalScreenshotFields(csvRow, missing = []) {
     ['Pingdom_Screenshot', 'pingdom'],
     ['DNS_Screenshot', 'dns'],
     ['IntoDNS_Screenshot', 'intodns'],
+    ['InDepthDNS_Screenshot', 'indepthdns'],
   ];
 
   for (const [field, token] of mapping) {
@@ -1797,6 +1911,57 @@ function normalizeSSLDataForCSV(sslResult = {}) {
   return { overallGrade, totalEndpoints, allGrades };
 }
 
+
+function normalizeWordPressDetectionForCSV(wordpress = {}) {
+  const verdict = String(wordpress.verdict || 'unknown').trim().toLowerCase();
+  const confidence = String(wordpress.confidence || 'none').trim().toLowerCase();
+  const score = Number(wordpress.score || 0) || 0;
+  const markerCount = Number(
+    wordpress.markerCount ??
+    wordpress.evidenceCount ??
+    (Array.isArray(wordpress.evidence) ? wordpress.evidence.length : 0) ??
+    0
+  ) || 0;
+
+  // FileMaker boolean policy:
+  // 1 = confirmed, wordpress, or likely WordPress
+  // 0 = not detected or only low-confidence possible marker
+  // empty = unknown/error/no HTML/skipped
+  let isWordPress = '';
+  if (
+    verdict === 'confirmed_wordpress' ||
+    verdict === 'wordpress' ||
+    verdict === 'likely_wordpress'
+  ) {
+    isWordPress = 1;
+  } else if (verdict === 'not_detected' || verdict === 'possible_wordpress') {
+    isWordPress = 0;
+  }
+
+  let evidenceText = '';
+  try {
+    evidenceText = Array.isArray(wordpress.evidence)
+      ? wordpress.evidence
+          .map((item) => `${item.marker || ''}: ${item.detail || ''}`.trim())
+          .filter(Boolean)
+          .join(' | ')
+      : '';
+  } catch (_) {
+    evidenceText = '';
+  }
+
+  return {
+    isWordPress,
+    verdict,
+    confidence,
+    score,
+    markerCount,
+    finalUrl: wordpress.finalUrl || '',
+    error: wordpress.error || '',
+    evidenceText,
+  };
+}
+
 function buildCSVRow(results, paths, totalTimeStr) {
   const syncEnabled = String(process.env.IMAGE_SYNC_ENABLED || 'false').toLowerCase() === 'true';
   const syncBaseUrl = (process.env.IMAGE_SYNC_BASE_URL || '').replace(/\/$/, '');
@@ -1827,6 +1992,10 @@ function buildCSVRow(results, paths, totalTimeStr) {
   const pingdomData = normalizePingdomDataFields(results.pingdom?.data || {});
   const pingdomGrade = normalizePingdomGradeForCSV(pingdomData);
   const sslCSV = normalizeSSLDataForCSV(results.ssllabs || {});
+  const wpCSV = normalizeWordPressDetectionForCSV(results.wordpress || {});
+  const indepthdnsData = results.indepthdns?.data || {};
+  const indepthdnsCounts = indepthdnsData.counts || {};
+  const indepthdnsTiming = indepthdnsData.timing || {};
 
   return {
     Domain: results.domain,
@@ -1929,6 +2098,32 @@ function buildCSVRow(results, paths, totalTimeStr) {
     IntoDNS_SOA_Serial: results.intodns.data?.soaSerial || '',
     IntoDNS_URL: results.intodns.url || `https://intodns.com/${results.domain}`,
     IntoDNS_Screenshot: screenshotPath(results.intodns.screenshot),
+
+    InDepthDNS_Status: results.indepthdns?.status || 'SKIPPED',
+    InDepthDNS_Error: results.indepthdns?.error || null,
+    InDepthDNS_ErrorCode: results.indepthdns?.errorCode || getErrorCode({ error: results.indepthdns?.error }) || null,
+    InDepthDNS_OverallHealth: indepthdnsData.overallHealth || 'N/A',
+    InDepthDNS_All: indepthdnsCounts.all ?? 'N/A',
+    InDepthDNS_Pass: indepthdnsCounts.pass ?? 'N/A',
+    InDepthDNS_Warn: indepthdnsCounts.warn ?? 'N/A',
+    InDepthDNS_Fail: indepthdnsCounts.fail ?? 'N/A',
+    InDepthDNS_Info: indepthdnsCounts.info ?? 'N/A',
+    InDepthDNS_Phase1Time: indepthdnsTiming.phase1 || 'N/A',
+    InDepthDNS_Phase2Time: indepthdnsTiming.phase2 || 'N/A',
+    InDepthDNS_TotalElapsed: indepthdnsTiming.total || 'N/A',
+    InDepthDNS_URL: results.indepthdns?.url || 'https://tool.indepthdns.com/',
+    InDepthDNS_Screenshot: screenshotPath(results.indepthdns?.screenshot),
+
+    // New fields appended at the end so existing FileMaker import mappings by
+    // column order keep SSL/Sucuri/PageSpeed/Pingdom/DNS fields aligned.
+    IsWordPress: wpCSV.isWordPress,
+    WordPress_Verdict: wpCSV.verdict,
+    WordPress_Confidence: wpCSV.confidence,
+    WordPress_Score: wpCSV.score,
+    WordPress_MarkerCount: wpCSV.markerCount,
+    WordPress_Final_URL: wpCSV.finalUrl,
+    WordPress_Error: wpCSV.error,
+    WordPress_Evidence: wpCSV.evidenceText,
   };
 }
 
@@ -1955,6 +2150,9 @@ function printSummary(results, paths, csvRow, totalTimeStr) {
   );
   console.log(
     `🌐 IntoDNS        : ${csvRow.IntoDNS_OverallHealth} (Errors: ${csvRow.IntoDNS_ErrorCount}, Warnings: ${csvRow.IntoDNS_WarnCount})`
+  );
+  console.log(
+    `🧭 INDepthDNS     : ${csvRow.InDepthDNS_OverallHealth} (PASS: ${csvRow.InDepthDNS_Pass}, WARN: ${csvRow.InDepthDNS_Warn}, FAIL: ${csvRow.InDepthDNS_Fail}, INFO: ${csvRow.InDepthDNS_Info})`
   );
   console.log(line);
   console.log(`📁 Results saved to:`);
@@ -2032,6 +2230,77 @@ async function main() {
       statusText: homepageCheck?.statusText || reachability?.statusText,
     };
 
+    let wordpressCheck = {
+      inputUrl: domain,
+      checkedUrl: domain,
+      finalUrl: mergedReachability.finalUrl || '',
+      status: mergedReachability.statusCode || null,
+      verdict: 'unknown',
+      confidence: 'none',
+      score: 0,
+      markerCount: 0,
+      evidence: [],
+      error: '',
+    };
+
+    if (String(process.env.WORDPRESS_DETECT_ENABLED || '1').trim() !== '0') {
+      const wpInput = mergedReachability.finalUrl || reachability?.finalUrl || reachability?.url || domain;
+      progressLog(`Checking WordPress markers for ${domain}...`);
+      try {
+        // Prefer the raw HTML already fetched by fetchTargetHomepageSnippet so we
+        // avoid a second cold HTTP request. That second request fails on Cloudflare-
+        // protected or JS-gated sites and always returns not_detected, even for real
+        // WordPress installs. The homepage fetch uses the same User-Agent and follows
+        // redirects, so its HTML is the most reliable source of WP markers.
+        const cachedHtml = homepageCheck?.rawHtml || '';
+        const MIN_HTML_BYTES = 500;
+        if (cachedHtml.length >= MIN_HTML_BYTES) {
+          const wpDetectorModule = require('./utils/detect-wordpress');
+          if (typeof wpDetectorModule.detectWordPressFromHtml === 'function') {
+            progressLog(`WordPress check: using cached homepage HTML (${cachedHtml.length} bytes)`);
+            const detection = wpDetectorModule.detectWordPressFromHtml(cachedHtml, {
+              finalUrl: mergedReachability.finalUrl || homepageCheck?.url || wpInput || domain,
+            });
+            wordpressCheck = {
+              inputUrl: wpInput || domain,
+              checkedUrl: wpInput || domain,
+              finalUrl: mergedReachability.finalUrl || homepageCheck?.url || '',
+              status: mergedReachability.statusCode || homepageCheck?.statusCode || null,
+              ...detection,
+              error: detection?.error || null,
+            };
+          } else {
+            progressLog('WordPress check: cached HTML parser not exported; falling back to full detector');
+            wordpressCheck = await detectWordPress(wpInput || domain);
+          }
+        } else {
+          // Fallback: no cached HTML (SKIP_HOMEPAGE_CONTENT_CHECK=1, timed out, or
+          // the response was too short). Make a fresh request via detectWordPress().
+          progressLog(`WordPress check: cached HTML not available (${cachedHtml.length} bytes), fetching fresh`);
+          wordpressCheck = await detectWordPress(wpInput || domain);
+        }
+        progressLog(
+          `WordPress check: ${wordpressCheck.verdict} ` +
+          `(${wordpressCheck.confidence}, score ${wordpressCheck.score || 0}, markers ${wordpressCheck.markerCount || 0})`
+        );
+      } catch (wpErr) {
+        wordpressCheck = {
+          ...wordpressCheck,
+          verdict: 'unknown',
+          confidence: 'none',
+          error: wpErr?.message || String(wpErr),
+        };
+        progressLog(`⚠️ WordPress check failed for ${domain}: ${wordpressCheck.error}`);
+      }
+    } else {
+      wordpressCheck.verdict = 'skipped';
+      wordpressCheck.confidence = 'none';
+      wordpressCheck.error = 'WORDPRESS_DETECT_ENABLED=0';
+      progressLog('WordPress check skipped because WORDPRESS_DETECT_ENABLED=0');
+    }
+
+    writeWordPressEarlyResult(wordpressCheck);
+
     const parkedFailure = homepageCheck?.parkedFailure
       ? {
           ...homepageCheck.parkedFailure,
@@ -2047,6 +2316,7 @@ async function main() {
       const totalMs = Date.now() - totalStart;
       const totalTimeStr = formatDuration(totalMs);
       const fatalResults = makeFatalDomainResults(domain, fatalFailure);
+      fatalResults.wordpress = wordpressCheck;
       const csvRow = buildCSVRow(fatalResults, paths, totalTimeStr);
 
       if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -2077,7 +2347,7 @@ async function main() {
 
     progressLog(`✅ ${domain} is reachable (${reachability.reason || reachability.status || 'OK'}) — starting full scan`);
 
-    const browserToolKeys = ['ssl', 'sucuri', 'pagespeed', 'pingdom', 'dns', 'pagerank', 'intodns'];
+    const browserToolKeys = ['ssl', 'sucuri', 'pagespeed', 'pingdom', 'dns', 'pagerank', 'intodns', 'indepthdns'];
     const needsBrowser = browserToolKeys.some((key) => isEnabled(key));
 
     let newTab = null;
@@ -2254,6 +2524,15 @@ async function main() {
         fn: () => runIntoDNS(domain, context),
         label: (r) => `Health: ${r?.data?.overallHealth || 'N/A'}`,
       },
+      {
+        key: 'indepthdns',
+        enabled: isEnabled('indepthdns'),
+        fn: () => runInDepthDNS(domain, context),
+        label: (r) => {
+          const counts = r?.data?.counts || {};
+          return `Health: ${r?.data?.overallHealth || 'N/A'} | PASS:${counts.pass ?? 'N/A'} WARN:${counts.warn ?? 'N/A'} FAIL:${counts.fail ?? 'N/A'}`;
+        },
+      },
     ];
 
     let toolResults;
@@ -2277,6 +2556,7 @@ async function main() {
       pagerankResult,
       serverResult,
       intodnsResult,
+      indepthdnsResult,
     ] = toolResults;
 
     console.log = origLog;
@@ -2285,6 +2565,7 @@ async function main() {
     const results = {
       domain,
       timestamp: new Date().toISOString(),
+      wordpress: wordpressCheck,
       ssllabs:
         sslResult.status === 'fulfilled'
           ? sslResult.value
@@ -2317,6 +2598,10 @@ async function main() {
         intodnsResult.status === 'fulfilled'
           ? intodnsResult.value
           : { status: 'FAILED', error: intodnsResult.reason?.message, data: {} },
+      indepthdns:
+        indepthdnsResult.status === 'fulfilled'
+          ? indepthdnsResult.value
+          : { status: 'FAILED', error: indepthdnsResult.reason?.message, data: {} },
     };
 
     progressLog('All services done — preparing screenshots and CSV...');

@@ -1,0 +1,1452 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scan Recovery Monitor</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 14px;
+        background: #f3f3f3;
+        color: #222;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+      }
+
+      .top-summary {
+        background: #081323;
+        color: #fff;
+        border-radius: 3px;
+        padding: 16px 18px;
+        margin-bottom: 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        border: 1px solid #14243a;
+      }
+      .page-title {
+        font-size: 18px;
+        font-weight: 800;
+        margin: 0 0 3px 0;
+        letter-spacing: -0.02em;
+      }
+      .page-subtitle {
+        font-size: 12px;
+        color: #b8c4d8;
+        line-height: 1.35;
+      }
+      .summary-metrics {
+        display: flex;
+        gap: 18px;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .summary-metric {
+        text-align: right;
+        min-width: 78px;
+      }
+      .summary-label {
+        display: block;
+        color: #9aa9bf;
+        font-size: 9px;
+        text-transform: uppercase;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+      }
+      .summary-value {
+        display: block;
+        color: #fff;
+        font-size: 18px;
+        font-weight: 900;
+        line-height: 1.15;
+      }
+
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+        color: #666;
+        font-size: 12px;
+      }
+      .btn {
+        height: 28px;
+        padding: 0 12px;
+        border: 1px solid #ccc;
+        border-radius: 7px;
+        background: #f7f7f7;
+        color: #222;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .btn:hover {
+        background: #eee;
+      }
+      .btn-blue {
+        background: #185fa5;
+        color: #fff;
+        border-color: #185fa5;
+      }
+      .btn-blue:hover {
+        background: #1470b8;
+      }
+      .btn-orange {
+        background: #ef7d00;
+        color: #fff;
+        border-color: #ef7d00;
+      }
+      .btn-orange:hover {
+        background: #dc7400;
+      }
+      .btn-red {
+        background: #fff;
+        color: #b02030;
+        border-color: #e3b3b8;
+      }
+      .btn-red:hover {
+        background: #fdecee;
+      }
+      .btn-grey {
+        background: #6b7280;
+        color: #fff;
+        border: none;
+      }
+      .btn-grey:hover {
+        background: #4b5563;
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      .notice {
+        display: none;
+        background: #e8f1fb;
+        border: 1px solid #c9dff6;
+        color: #185fa5;
+        border-radius: 8px;
+        padding: 9px 12px;
+        margin-bottom: 12px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .columns {
+        display: flex;
+        align-items: stretch;
+        gap: 14px;
+        width: 100%;
+      }
+      .col-servers {
+        width: 230px;
+        min-width: 210px;
+      }
+      .col-batches {
+        width: 490px;
+        min-width: 400px;
+      }
+      .col-detail {
+        flex: 1;
+        min-width: 420px;
+      }
+
+      .panel {
+        background: #fff;
+        border: 1px solid #d8d8d8;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .panel-pad {
+        padding: 14px 16px;
+      }
+      .panel-title {
+        font-size: 12px;
+        font-weight: 800;
+        color: #333;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin: 0 0 10px 0;
+      }
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 9px;
+        gap: 10px;
+      }
+      .section-title {
+        font-size: 13px;
+        font-weight: 800;
+        color: #333;
+        margin: 0;
+      }
+      .muted {
+        color: #777;
+      }
+
+      .server-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 8px 10px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        margin-bottom: 6px;
+        cursor: pointer;
+        background: #fff;
+        color: #333;
+        font-weight: 700;
+      }
+      .server-row:hover {
+        background: #f8f9fc;
+        border-color: #d9e3f2;
+      }
+      .server-row.active {
+        background: #e8f1fb;
+        border-color: #a9c8e9;
+        color: #185fa5;
+      }
+      .server-row.offline {
+        color: #b02030;
+      }
+      .server-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .server-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #aaa;
+        margin-left: 6px;
+        flex: 0 0 auto;
+      }
+      .server-dot.ok {
+        background: #28a745;
+      }
+      .server-dot.warn {
+        background: #e07b00;
+      }
+      .server-dot.offline {
+        background: #dc3545;
+      }
+      .count-pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 20px;
+        background: #eef4ff;
+        color: #185fa5;
+        font-size: 10px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+      .offline-msg {
+        color: #b02030;
+        font-size: 11px;
+        line-height: 1.35;
+        margin: -2px 0 8px 10px;
+        word-break: break-word;
+      }
+
+      .batch-list {
+        max-height: 620px;
+        overflow: auto;
+        padding-right: 2px;
+      }
+      .batch-card {
+        background: #fff;
+        border: 1px solid #d8d8d8;
+        border-radius: 10px;
+        padding: 13px 14px;
+        margin-bottom: 10px;
+        cursor: pointer;
+      }
+      .batch-card:hover {
+        border-color: #a9c8e9;
+        background: #fbfdff;
+      }
+      .batch-card.active {
+        border-color: #185fa5;
+        box-shadow: 0 0 0 1px #185fa5 inset;
+        background: #f7fbff;
+      }
+      .batch-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .batch-id {
+        font-size: 14px;
+        font-weight: 900;
+        color: #185fa5;
+        word-break: break-all;
+        line-height: 1.3;
+      }
+      .batch-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        color: #555;
+        font-size: 11px;
+        margin-bottom: 6px;
+      }
+      .progress-track {
+        height: 7px;
+        background: #e6e9ef;
+        border-radius: 20px;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: #185fa5;
+        border-radius: 20px;
+        transition: width 0.25s;
+      }
+      .progress-fill.warn {
+        background: #e07b00;
+      }
+      .batch-foot {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 11px;
+        color: #777;
+        margin-top: 8px;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 20px;
+        font-size: 10px;
+        line-height: 1;
+        font-weight: 800;
+        white-space: nowrap;
+        border: 1px solid #d4dbe6;
+        background: #f2f5f9;
+        color: #555;
+        text-transform: uppercase;
+      }
+      .badge-red {
+        background: #fdecee;
+        color: #b02030;
+        border-color: #f3c6cc;
+      }
+      .badge-orange {
+        background: #fff4e6;
+        color: #ad5d00;
+        border-color: #ffd7a3;
+      }
+      .badge-blue {
+        background: #e8f1fb;
+        color: #185fa5;
+        border-color: #c7ddf4;
+      }
+      .badge-green {
+        background: #e9f7ee;
+        color: #1a6e31;
+        border-color: #cfe8d7;
+      }
+
+      .empty {
+        text-align: center;
+        padding: 32px 18px;
+        color: #999;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .detail-header {
+        background: #fff;
+        border-bottom: 1px solid #e6e6e6;
+        padding: 16px 18px;
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+      }
+      .detail-title {
+        font-size: 16px;
+        font-weight: 900;
+        color: #222;
+        margin-bottom: 5px;
+        word-break: break-all;
+      }
+      .detail-subtitle {
+        font-size: 11px;
+        color: #777;
+        line-height: 1.4;
+      }
+      .detail-actions {
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        min-width: 210px;
+      }
+      .detail-body {
+        padding: 16px 18px;
+      }
+      .detail-grid {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+      }
+      .detail-card {
+        background: #f8f9fc;
+        border: 1px solid #e5e5e5;
+        border-radius: 9px;
+        padding: 11px 12px;
+        flex: 1;
+        min-width: 130px;
+      }
+      .detail-label {
+        color: #777;
+        font-size: 10px;
+        text-transform: uppercase;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        margin-bottom: 4px;
+      }
+      .detail-value {
+        color: #222;
+        font-size: 18px;
+        line-height: 1.15;
+        font-weight: 900;
+      }
+      .detail-value.small {
+        font-size: 12px;
+        line-height: 1.35;
+        word-break: break-word;
+      }
+      .recovery-note {
+        background: #fff7e6;
+        border: 1px solid #ffd58a;
+        color: #7a4b00;
+        border-radius: 9px;
+        padding: 10px 12px;
+        line-height: 1.4;
+        font-size: 12px;
+        margin-bottom: 14px;
+      }
+      .domain-panel-title {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 8px 0;
+        font-weight: 800;
+        color: #333;
+      }
+      .domain-table-wrap {
+        border: 1px solid #e6e6e6;
+        border-radius: 9px;
+        overflow: hidden;
+        max-height: 360px;
+        overflow-y: auto;
+      }
+      .domain-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+      .domain-table th {
+        background: #f5f6f8;
+        color: #666;
+        font-size: 10px;
+        text-transform: uppercase;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid #e6e6e6;
+      }
+      .domain-table td {
+        padding: 8px 10px;
+        border-bottom: 1px solid #f0f0f0;
+        font-size: 12px;
+        vertical-align: middle;
+      }
+      .domain-table tr:last-child td {
+        border-bottom: none;
+      }
+      .domain-table .right {
+        text-align: right;
+      }
+      .domain-name {
+        font-weight: 700;
+        color: #333;
+        word-break: break-all;
+      }
+      .mono {
+        font-family: Consolas, "Courier New", monospace;
+      }
+
+      @media (max-width: 1160px) {
+        .columns {
+          flex-wrap: wrap;
+        }
+        .col-servers {
+          width: 220px;
+        }
+        .col-batches {
+          flex: 1;
+          min-width: 360px;
+        }
+        .col-detail {
+          flex-basis: 100%;
+          min-width: 100%;
+        }
+      }
+      @media (max-width: 720px) {
+        body {
+          padding: 8px;
+          font-size: 12px;
+        }
+        .top-summary {
+          display: block;
+        }
+        .summary-metrics {
+          justify-content: flex-start;
+          margin-top: 12px;
+        }
+        .summary-metric {
+          text-align: left;
+        }
+        .columns {
+          display: block;
+        }
+        .col-servers,
+        .col-batches,
+        .col-detail {
+          width: 100%;
+          min-width: 0;
+          margin-bottom: 12px;
+        }
+        .detail-header {
+          display: block;
+        }
+        .detail-actions {
+          justify-content: flex-start;
+          margin-top: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="top-summary">
+      <div>
+        <div class="page-title">Scan Recovery Monitor</div>
+        <div class="page-subtitle">
+          Shows only interrupted/stopped scans that have no active worker attached. Running scans are hidden here. Click Continue Scanning to resume only the unfinished domains.
+        </div>
+      </div>
+      <div class="summary-metrics">
+        <div class="summary-metric">
+          <span class="summary-label">Servers</span
+          ><span class="summary-value" id="sumServers">0</span>
+        </div>
+        <div class="summary-metric">
+          <span class="summary-label">Needs Resume</span
+          ><span class="summary-value" id="sumRecoverable">0</span>
+        </div>
+        <div class="summary-metric">
+          <span class="summary-label">Remaining</span
+          ><span class="summary-value" id="sumRemaining">0</span>
+        </div>
+        <div class="summary-metric">
+          <span class="summary-label">Offline</span
+          ><span class="summary-value" id="sumOffline">0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div id="lastUpdated">Loading recovery state…</div>
+      <button class="btn btn-blue" onclick="refreshAll(true)">
+        ↺ Refresh Now
+      </button>
+    </div>
+
+    <div class="notice" id="notice"></div>
+
+    <div class="columns">
+      <div class="col-servers">
+        <div class="panel panel-pad">
+          <div class="panel-title">Servers</div>
+          <div id="serversBox"><div class="empty">Loading servers…</div></div>
+        </div>
+      </div>
+
+      <div class="col-batches">
+        <div class="section-head">
+          <h3 class="section-title" id="batchTitle">Batches</h3>
+          <span class="count-pill" id="serverBatchCount">0 found</span>
+        </div>
+        <div class="batch-list" id="batchesBox">
+          <div class="panel"><div class="empty">Select a server.</div></div>
+        </div>
+      </div>
+
+      <div class="col-detail">
+        <div class="panel" id="detailPanel">
+          <div class="empty">
+            Select a server on the left, then click a batch in the middle column
+            to view details.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var refreshTimer = null;
+        var selectedServerName = "";
+        var selectedJobKey = "";
+        var showAllDomains = false;
+        var allServerResults = [];
+        var allJobs = [];
+
+        function byId(id) {
+          return document.getElementById(id);
+        }
+        function esc(v) {
+          return String(v == null ? "" : v)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+        }
+        function jsEsc(v) {
+          return String(v == null ? "" : v)
+            .replace(/\\/g, "\\\\")
+            .replace(/'/g, "\\'");
+        }
+        function safeDecode(v) {
+          var out = String(v || "").replace(/\+/g, " ");
+          for (var i = 0; i < 4; i++) {
+            try {
+              var dec = decodeURIComponent(out);
+              if (dec === out) break;
+              out = dec;
+            } catch (e) {
+              break;
+            }
+          }
+          return out;
+        }
+        function getParam(name) {
+          var qs = window.location.search.substring(1);
+          if (!qs) return "";
+          var parts = qs.split("&");
+          for (var i = 0; i < parts.length; i++) {
+            var pair = parts[i].split("=");
+            if (safeDecode(pair[0] || "") === name)
+              return safeDecode(pair.slice(1).join("=") || "");
+          }
+          return "";
+        }
+        function parseServers() {
+          var raw = getParam("servers");
+          if (!raw)
+            return [
+              {
+                name: window.location.hostname,
+                base: window.location.protocol + "//" + window.location.host,
+              },
+            ];
+          var out = [];
+          var arr = raw.split(",");
+          for (var i = 0; i < arr.length; i++) {
+            var item = arr[i];
+            if (!item) continue;
+            var parts = item.split("|");
+            var name = parts[0] || item;
+            var base = parts[1] || parts[0] || "";
+            if (base.charAt(base.length - 1) === "/")
+              base = base.substring(0, base.length - 1);
+            if (base) out.push({ name: name, base: base });
+          }
+          return out;
+        }
+
+        var SERVERS = parseServers();
+        var refreshSeconds = parseInt(getParam("refresh") || "15", 10) || 15;
+        if (refreshSeconds < 5) refreshSeconds = 5;
+
+        function xhrJson(method, url, body, ok, fail) {
+          var xhr = new XMLHttpRequest();
+          xhr.open(
+            method,
+            url +
+              (url.indexOf("?") >= 0 ? "&" : "?") +
+              "_ts=" +
+              new Date().getTime(),
+            true
+          );
+          xhr.timeout = 15000;
+          xhr.setRequestHeader("Accept", "application/json");
+          if (method !== "GET")
+            xhr.setRequestHeader("Content-Type", "application/json");
+          xhr.onreadystatechange = function () {
+            if (xhr.readyState !== 4) return;
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                ok(JSON.parse(xhr.responseText));
+              } catch (e) {
+                if (fail)
+                  fail("Invalid JSON: " + xhr.responseText.substring(0, 200));
+              }
+            } else {
+              if (fail)
+                fail(
+                  "HTTP " +
+                    xhr.status +
+                    ": " +
+                    xhr.responseText.substring(0, 200)
+                );
+            }
+          };
+          xhr.onerror = function () {
+            if (fail) fail("Network error");
+          };
+          xhr.ontimeout = function () {
+            if (fail) fail("Timeout");
+          };
+          xhr.send(method === "GET" ? null : JSON.stringify(body || {}));
+        }
+
+        function toInt(v) {
+          var n = parseInt(v, 10);
+          return isNaN(n) ? 0 : n;
+        }
+        function toPct(job) {
+          var p = parseFloat(job && job.percent);
+          if (isNaN(p)) {
+            var total = toInt(job && job.total);
+            var completed = toInt(job && job.completed);
+            p = total > 0 ? (completed / total) * 100 : 0;
+          }
+          if (p < 0) p = 0;
+          if (p > 100) p = 100;
+          return p;
+        }
+        function statusClass(status) {
+          var s = String(status || "").toLowerCase();
+          if (s === "needs_resume")
+            return "badge-orange";
+          if (s === "interrupted" || s === "stopped" || s === "halted")
+            return "badge-orange";
+          if (s === "queued" || s === "waiting_gap" || s === "waiting")
+            return "badge-orange";
+          if (s === "running" || s === "scanning" || s === "resumed")
+            return "badge-blue";
+          if (s === "done" || s === "complete") return "badge-green";
+          return "";
+        }
+        function statusBadge(status) {
+          var raw = String(status || "unknown");
+          var s = raw.toLowerCase();
+          var label = (
+            s === "needs_resume" ||
+            s === "interrupted" ||
+            s === "stopped" ||
+            s === "halted" ||
+            s === "queued" ||
+            s === "pending" ||
+            s === "waiting" ||
+            s === "waiting_gap" ||
+            s === "error"
+          )
+            ? "NEEDS RESUME"
+            : raw.replace(/_/g, " ");
+          return (
+            '<span class="badge ' +
+            statusClass(status) +
+            '">' +
+            esc(label) +
+            "</span>"
+          );
+        }
+
+        function normStatusValue(status) {
+          return String(status || "").toLowerCase().replace(/^\s+|\s+$/g, "");
+        }
+
+        function isTrueValue(v) {
+          return v === true || String(v || "").toLowerCase() === "true" || String(v || "") === "1";
+        }
+
+        function isActiveJobStatus(status) {
+          var s = normStatusValue(status);
+          return (
+            s === "running" ||
+            s === "scanning" ||
+            s === "processing" ||
+            s === "starting" ||
+            s === "active" ||
+            s === "resumed" ||
+            s === "recovering"
+          );
+        }
+
+        function isResumeJob(job) {
+          if (!job) return false;
+
+          // Recovery Monitor must not show jobs that still have an active worker.
+          if (isTrueValue(job.running)) return false;
+
+          if (toInt(job.remaining) <= 0) return false;
+
+          var s = normStatusValue(job.status);
+          var raw = normStatusValue(job.raw_status);
+
+          if (
+            s === "needs_resume" ||
+            s === "interrupted" ||
+            s === "stopped" ||
+            s === "halted" ||
+            s === "queued" ||
+            s === "pending" ||
+            s === "waiting" ||
+            s === "waiting_gap" ||
+            s === "error"
+          ) {
+            return true;
+          }
+
+          // Legacy/orphan fallback: meta may still say RUNNING after PM2/server restart,
+          // but only show it here when Node reports that no worker is attached.
+          return isActiveJobStatus(raw);
+        }
+
+        function normalizeResumeJob(job) {
+          if (!job) return job;
+          if (!isTrueValue(job.running) && isActiveJobStatus(job.status)) {
+            job.status = "needs_resume";
+          }
+          return job;
+        }
+
+        function filterResumeJobs(rows) {
+          var out = [];
+          rows = rows || [];
+          for (var i = 0; i < rows.length; i++) {
+            var job = normalizeResumeJob(rows[i]);
+            if (isResumeJob(job)) out.push(job);
+          }
+          return out;
+        }
+
+        function isResumeDomainStatus(status) {
+          var s = normStatusValue(status);
+          return !(
+            s === "done" ||
+            s === "complete" ||
+            s === "completed" ||
+            s === "uploaded" ||
+            s === "scanning" ||
+            s === "running" ||
+            s === "processing" ||
+            s === "starting" ||
+            s === "active"
+          );
+        }
+
+        function filterResumeDomainRows(rows) {
+          var out = [];
+          rows = rows || [];
+          for (var i = 0; i < rows.length; i++) {
+            var row = rows[i] || {};
+            if (isResumeDomainStatus(row.status || "queued")) out.push(row);
+          }
+          return out;
+        }
+        function jobKey(job) {
+          return (
+            (job._serverName || "") +
+            "::" +
+            (job.type || "") +
+            "::" +
+            (job.batch_id || job.job_id || job.domain || "")
+          );
+        }
+        function fmtDate(s) {
+          if (!s) return "—";
+          var d = new Date(s);
+          if (isNaN(d.getTime())) return s;
+          return d.toLocaleString();
+        }
+        function fmtAgo(s) {
+          if (!s) return "—";
+          var t = new Date(s).getTime();
+          if (isNaN(t)) return "—";
+          var sec = Math.max(0, Math.floor((new Date().getTime() - t) / 1000));
+          if (sec < 60) return sec + "s ago";
+          var min = Math.floor(sec / 60);
+          if (min < 60) return min + "m ago";
+          var hr = Math.floor(min / 60);
+          if (hr < 24) return hr + "h ago";
+          return Math.floor(hr / 24) + "d ago";
+        }
+        function setNotice(text, good) {
+          var n = byId("notice");
+          if (!text) {
+            n.style.display = "none";
+            n.innerHTML = "";
+            return;
+          }
+          n.style.display = "block";
+          n.style.background = good ? "#e9f7ee" : "#e8f1fb";
+          n.style.borderColor = good ? "#cfe8d7" : "#c9dff6";
+          n.style.color = good ? "#1a6e31" : "#185fa5";
+          n.innerHTML = esc(text);
+        }
+
+        function recoveryProxyUrl() {
+          var rawServers = getParam("servers");
+          return (
+            window.location.protocol +
+            "//" +
+            window.location.host +
+            "/recovery-jobs-all?include_single=1&include_running=0&only_resume=1&servers=" +
+            encodeURIComponent(rawServers)
+          );
+        }
+
+        function refreshAll(manual) {
+          if (manual) setNotice("Refreshing recovery state...");
+          allServerResults = [];
+          allJobs = [];
+
+          // FileMaker 17 Web Viewer can hang on direct cross-server AJAX.
+          // So this page calls only the same server that hosts the HTML (usually V1).
+          // V1 then fetches /recovery-jobs from every VM through /recovery-jobs-all.
+          xhrJson(
+            "GET",
+            recoveryProxyUrl(),
+            null,
+            function (data) {
+              var serverRows = data && data.servers ? data.servers : [];
+              var byName = {};
+              for (var i = 0; i < serverRows.length; i++) {
+                var row = serverRows[i] || {};
+                var srv = { name: row.name || "Server", base: row.base || "" };
+                var rawJobs = row.jobs || [];
+                var jobs = [];
+                for (var j = 0; j < rawJobs.length; j++) {
+                  rawJobs[j]._serverName = srv.name;
+                  rawJobs[j]._serverBase = srv.base;
+                }
+                jobs = filterResumeJobs(rawJobs);
+                byName[srv.name] = {
+                  ok: row.ok === true,
+                  server: srv,
+                  data: row.data || null,
+                  error: row.error || "",
+                  jobs: jobs,
+                };
+                allJobs = allJobs.concat(jobs);
+              }
+
+              // Keep all configured servers visible, even if the proxy response
+              // did not include one of them for any reason.
+              for (var s = 0; s < SERVERS.length; s++) {
+                var configured = SERVERS[s];
+                if (byName[configured.name]) {
+                  allServerResults.push(byName[configured.name]);
+                } else {
+                  allServerResults.push({
+                    ok: false,
+                    server: configured,
+                    error: "No response from recovery proxy",
+                    jobs: [],
+                  });
+                }
+              }
+
+              if (manual) setNotice("Recovery state refreshed.", true);
+              renderAll();
+            },
+            function (err) {
+              allServerResults = [];
+              for (var i = 0; i < SERVERS.length; i++) {
+                allServerResults.push({
+                  ok: false,
+                  server: SERVERS[i],
+                  error: "Cannot reach recovery proxy on this server: " + err,
+                  jobs: [],
+                });
+              }
+              if (manual) setNotice("Recovery monitor error: " + err);
+              renderAll();
+            }
+          );
+        }
+
+        function serverResultByName(name) {
+          for (var i = 0; i < allServerResults.length; i++)
+            if (allServerResults[i].server.name === name)
+              return allServerResults[i];
+          return null;
+        }
+        function jobsForServer(name) {
+          var out = [];
+          for (var i = 0; i < allJobs.length; i++)
+            if (allJobs[i]._serverName === name) out.push(allJobs[i]);
+          return out;
+        }
+        function currentJobs() {
+          return selectedServerName ? jobsForServer(selectedServerName) : [];
+        }
+        function findSelectedJob() {
+          var jobs = currentJobs();
+          for (var i = 0; i < jobs.length; i++)
+            if (jobKey(jobs[i]) === selectedJobKey) return jobs[i];
+          return jobs.length ? jobs[0] : null;
+        }
+        function chooseDefaultSelection() {
+          if (!selectedServerName) {
+            for (var i = 0; i < SERVERS.length; i++) {
+              if (jobsForServer(SERVERS[i].name).length > 0) {
+                selectedServerName = SERVERS[i].name;
+                break;
+              }
+            }
+            if (!selectedServerName && SERVERS[0])
+              selectedServerName = SERVERS[0].name;
+          }
+          var jobs = currentJobs();
+          var exists = false;
+          for (var j = 0; j < jobs.length; j++)
+            if (jobKey(jobs[j]) === selectedJobKey) exists = true;
+          if (!exists) selectedJobKey = jobs.length ? jobKey(jobs[0]) : "";
+        }
+
+        function renderSummary() {
+          var online = 0;
+          var offline = 0;
+          var remaining = 0;
+          for (var i = 0; i < allServerResults.length; i++) {
+            if (allServerResults[i].ok) online++;
+            else offline++;
+          }
+          for (var j = 0; j < allJobs.length; j++)
+            remaining += toInt(allJobs[j].remaining);
+          byId("sumServers").innerHTML = online + "/" + SERVERS.length;
+          byId("sumRecoverable").innerHTML = allJobs.length;
+          byId("sumRemaining").innerHTML = remaining;
+          byId("sumOffline").innerHTML = offline;
+        }
+
+        function renderServers() {
+          var html = "";
+          for (var i = 0; i < SERVERS.length; i++) {
+            var srv = SERVERS[i];
+            var res = serverResultByName(srv.name);
+            var count = res && res.jobs ? res.jobs.length : 0;
+            var offline = res && !res.ok;
+            var active = selectedServerName === srv.name;
+            var dotCls = offline ? "offline" : count > 0 ? "warn" : "ok";
+            html +=
+              '<div class="server-row' +
+              (active ? " active" : "") +
+              (offline ? " offline" : "") +
+              '" onclick="selectServer(\'' +
+              jsEsc(srv.name) +
+              "')\">";
+            html += '<span class="server-name">' + esc(srv.name) + "</span>";
+            html +=
+              '<span><span class="count-pill">' +
+              count +
+              '</span><span class="server-dot ' +
+              dotCls +
+              '"></span></span>';
+            html += "</div>";
+            if (offline && active)
+              html +=
+                '<div class="offline-msg">Cannot reach ' +
+                esc(srv.base) +
+                "<br>" +
+                esc(res.error || "") +
+                "</div>";
+          }
+          byId("serversBox").innerHTML =
+            html || '<div class="empty">No servers configured.</div>';
+        }
+
+        function renderBatches() {
+          var jobs = currentJobs();
+          byId("batchTitle").innerHTML =
+            "Batches — " + esc(selectedServerName || "No server");
+          byId("serverBatchCount").innerHTML = jobs.length + " found";
+
+          if (!jobs.length) {
+            byId("batchesBox").innerHTML =
+              '<div class="panel"><div class="empty">No scans need resume for this server.</div></div>';
+            renderDetail(null);
+            return;
+          }
+
+          var html = "";
+          for (var i = 0; i < jobs.length; i++) {
+            var job = jobs[i];
+            var id = job.batch_id || job.job_id || job.domain || "unknown";
+            var p = toPct(job);
+            html +=
+              '<div class="batch-card' +
+              (jobKey(job) === selectedJobKey ? " active" : "") +
+              '" onclick="selectJob(\'' +
+              jsEsc(jobKey(job)) +
+              "')\">";
+            html +=
+              '<div class="batch-top"><div class="batch-id">' +
+              esc(id) +
+              "</div>" +
+              statusBadge(job.status) +
+              "</div>";
+            html +=
+              '<div class="batch-meta"><span>' +
+              p.toFixed(1) +
+              "% complete</span><span>" +
+              esc(fmtAgo(job.updated_at || job.started_at)) +
+              "</span></div>";
+            html +=
+              '<div class="progress-track"><div class="progress-fill warn" style="width:' +
+              p +
+              '%"></div></div>';
+            html +=
+              '<div class="batch-foot"><span>' +
+              esc(job.completed || 0) +
+              " / " +
+              esc(job.total || 0) +
+              " scanned</span><span>" +
+              esc(job.remaining || 0) +
+              " remaining</span></div>";
+            html += "</div>";
+          }
+          byId("batchesBox").innerHTML = html;
+        }
+
+        function domainRowsForJob(job) {
+          var rows = [];
+          if (!job) return rows;
+          if (job.domain_statuses && job.domain_statuses.length) {
+            rows = job.domain_statuses;
+          } else if (job.sample_domains && job.sample_domains.length) {
+            rows = job.sample_domains;
+          } else if (job.domains && job.domains.length) {
+            for (var i = 0; i < job.domains.length; i++)
+              rows.push({ domain: job.domains[i], status: "queued" });
+          } else if (job.domain) {
+            rows = [{ domain: job.domain, status: job.status || "stopped" }];
+          }
+          return filterResumeDomainRows(rows);
+        }
+
+        function renderDetail(job) {
+          if (!job) {
+            byId("detailPanel").innerHTML =
+              '<div class="empty">Select a batch to view details.</div>';
+            return;
+          }
+          var id = job.batch_id || job.job_id || job.domain || "unknown";
+          var p = toPct(job);
+          var rows = domainRowsForJob(job);
+          var limit = showAllDomains ? rows.length : Math.min(rows.length, 12);
+          var body = "";
+
+          for (var i = 0; i < limit; i++) {
+            var row = rows[i] || {};
+            body += "<tr>";
+            body +=
+              '<td><span class="domain-name">' +
+              esc(row.domain || "—") +
+              "</span></td>";
+            body += "<td>" + statusBadge(row.status || "queued") + "</td>";
+            body +=
+              '<td class="right mono">' +
+              esc(
+                row.updated_at
+                  ? fmtAgo(row.updated_at)
+                  : job.updated_at
+                    ? fmtAgo(job.updated_at)
+                    : "—"
+              ) +
+              "</td>";
+            body += "</tr>";
+          }
+          if (!body)
+            body =
+              '<tr><td colspan="3" class="empty">No domains need resume for this batch.</td></tr>';
+
+          var html = "";
+          html += '<div class="detail-header">';
+          html +=
+            '<div><div class="detail-title">Batch Details: ' +
+            esc(id) +
+            "</div>";
+          html +=
+            '<div class="detail-subtitle">Server: <b>' +
+            esc(job._serverName || "—") +
+            "</b> · Status: " +
+            statusBadge(job.status) +
+            " · Last update: " +
+            esc(fmtDate(job.updated_at || job.started_at)) +
+            "</div></div>";
+          html +=
+            '<div class="detail-actions"><button class="btn btn-grey" onclick="purgeSelected()" title="Delete metadata files so this batch no longer appears in the monitor. Use after manually deleting scan folders.">Purge Meta</button><button class="btn btn-red" onclick="cancelSelected()">Cancel Batch</button><button class="btn btn-orange" onclick="continueSelected()">Continue Scanning</button></div>';
+          html += "</div>";
+
+          html += '<div class="detail-body">';
+          html += '<div class="detail-grid">';
+          html +=
+            '<div class="detail-card"><div class="detail-label">Progress</div><div class="detail-value">' +
+            p.toFixed(1) +
+            "%</div></div>";
+          html +=
+            '<div class="detail-card"><div class="detail-label">Completed</div><div class="detail-value">' +
+            esc(job.completed || 0) +
+            "</div></div>";
+          html +=
+            '<div class="detail-card"><div class="detail-label">Remaining</div><div class="detail-value">' +
+            esc(job.remaining || 0) +
+            "</div></div>";
+          html +=
+            '<div class="detail-card"><div class="detail-label">Stopped</div><div class="detail-value">' +
+            esc(job.stopped || 0) +
+            "</div></div>";
+          html +=
+            '<div class="detail-card"><div class="detail-label">Queued</div><div class="detail-value">' +
+            esc(job.queued || 0) +
+            "</div></div>";
+          html +=
+            '<div class="detail-card"><div class="detail-label">Failed</div><div class="detail-value">' +
+            esc(job.failed || 0) +
+            "</div></div>";
+          html += "</div>";
+
+          html +=
+            '<div class="progress-track" style="margin-bottom:12px;"><div class="progress-fill warn" style="width:' +
+            p +
+            '%"></div></div>';
+          html +=
+            '<div class="recovery-note"><b>Recovery rule:</b> Continue Scanning resumes only unfinished domains for this batch/job on Node directly. Completed or uploaded domains are skipped. The FMS scheduler (Jobs Monitor Poll Wrapper-PSOS) will detect the resumed scan and upload results to FileMaker automatically — no FileMaker action required here.</div>';
+
+          html +=
+            '<div class="domain-panel-title"><span>Domains that will resume</span>';
+          if (rows.length > 12) {
+            html +=
+              '<button class="btn" onclick="toggleAllDomains()">' +
+              (showAllDomains ? "Show Less" : "Show All") +
+              "</button>";
+          }
+          html += "</div>";
+          html +=
+            '<div class="domain-table-wrap"><table class="domain-table"><thead><tr><th style="width:52%;">Domain Name</th><th style="width:24%;">Status</th><th class="right" style="width:24%;">Last Heartbeat</th></tr></thead><tbody>' +
+            body +
+            "</tbody></table></div>";
+          html +=
+            '<div class="batch-foot"><span>Showing ' +
+            limit +
+            " of " +
+            rows.length +
+            ' resumable domain row(s)</span><span class="mono">Type: ' +
+            esc(job.type || "batch") +
+            "</span></div>";
+          html += "</div>";
+
+          byId("detailPanel").innerHTML = html;
+        }
+
+        window.selectServer = function (name) {
+          selectedServerName = name;
+          selectedJobKey = "";
+          showAllDomains = false;
+          chooseDefaultSelection();
+          renderAll(false);
+        };
+        window.selectJob = function (key) {
+          selectedJobKey = key;
+          showAllDomains = false;
+          renderAll(false);
+        };
+        window.toggleAllDomains = function () {
+          showAllDomains = !showAllDomains;
+          renderDetail(findSelectedJob());
+        };
+        window.continueSelected = function () {
+          var job = findSelectedJob();
+          if (!job) return;
+          var label = job.batch_id || job.job_id || job.domain || "selected item";
+          if (
+            !confirm(
+              "Continue scanning this recovery item?\n\n" +
+                label +
+                "\n\nCompleted domains will be skipped.\n\n" +
+                "Node will resume the scan immediately.\n" +
+                "The FMS scheduler will automatically pick up and upload results to FileMaker."
+            )
+          )
+            return;
+
+          // ── POST directly to Node /recovery-continue ──────────────────────
+          // The FMS scheduler (Jobs Monitor Poll Wrapper-PSOS, runs every cycle)
+          // handles polling and uploading results back to FileMaker automatically.
+          // No FileMaker script call is needed here.
+          var body = {
+            type:     job.type || (job.batch_id ? "multi" : "single"),
+            batch_id: job.batch_id || "",
+            job_id:   job.job_id  || job.batch_id || job.domain || "",
+            domain:   job.domain  || job.current_domain || ""
+          };
+
+          setNotice("Sending resume request to Node for " + label + "...");
+          xhrJson(
+            "POST",
+            job._serverBase + "/recovery-continue",
+            body,
+            function (data) {
+              if (data && data.ok) {
+                setNotice(
+                  "Resume started on Node for " + label + ". " +
+                  "The FMS scheduler will upload results to FileMaker automatically.",
+                  true
+                );
+              } else {
+                setNotice(
+                  "Resume failed: " +
+                    (data && data.error ? data.error : "unknown error from Node")
+                );
+              }
+              selectedJobKey = "";
+              setTimeout(function () { refreshAll(false); }, 2000);
+            },
+            function (err) {
+              setNotice("Resume request failed: " + err);
+            }
+          );
+        };
+        window.purgeSelected = function () {
+          var job = findSelectedJob();
+          if (!job) return;
+          var label = job.batch_id || job.job_id || job.domain || "selected item";
+          if (job.running) {
+            alert("This batch is currently running. Stop it before purging.");
+            return;
+          }
+          if (!confirm(
+            "Purge all metadata for this batch?\n\n" + label +
+            "\n\nThis deletes the meta JSON, progress files, checkpoint, done flags, " +
+            "and domain list so the batch no longer appears in the monitor.\n\n" +
+            "Use this after you have manually deleted the scan folders for a clean retest.\n\n" +
+            "This CANNOT be undone."
+          )) return;
+
+          setNotice("Purging metadata for " + label + "...");
+          xhrJson(
+            "POST",
+            job._serverBase + "/recovery-purge",
+            { batch_id: job.batch_id || "" },
+            function (data) {
+              if (data && data.ok) {
+                setNotice(
+                  "Purged: " + (data.message || label) +
+                  (data.deleted && data.deleted.length ? " (" + data.deleted.length + " files removed)" : ""),
+                  true
+                );
+              } else {
+                setNotice("Purge failed: " + (data && data.error ? data.error : "unknown error"));
+              }
+              selectedJobKey = "";
+              setTimeout(function () { refreshAll(false); }, 1200);
+            },
+            function (err) {
+              setNotice("Purge failed: " + err);
+            }
+          );
+        };
+
+        window.cancelSelected = function () {
+          var job = findSelectedJob();
+          if (!job) return;
+          var label =
+            job.batch_id || job.job_id || job.domain || "selected item";
+          if (
+            !confirm(
+              "Cancel this recovery item?\n\n" +
+                label +
+                "\n\nThis marks the batch/job as CANCELLED. Existing result folders are not deleted."
+            )
+          )
+            return;
+          var body = {
+            type: job.type || (job.batch_id ? "multi" : "single"),
+            batch_id: job.batch_id || "",
+            job_id: job.job_id || job.batch_id || job.domain || "",
+            domain: job.domain || job.current_domain || "",
+            reason: "manual recovery cancel"
+          };
+          setNotice("Cancelling recovery item: " + label + "...");
+          xhrJson(
+            "POST",
+            job._serverBase + "/recovery-cancel",
+            body,
+            function (data) {
+              if (data && data.ok) setNotice("Recovery item cancelled.", true);
+              else
+                setNotice(
+                  "Cancel failed: " +
+                    (data && data.error ? data.error : "unknown error")
+                );
+              selectedJobKey = "";
+              setTimeout(function () {
+                refreshAll(false);
+              }, 1200);
+            },
+            function (err) {
+              setNotice("Cancel failed: " + err);
+            }
+          );
+        };
+
+        function renderAll(choose) {
+          if (choose !== false) chooseDefaultSelection();
+          renderSummary();
+          renderServers();
+          renderBatches();
+          renderDetail(findSelectedJob());
+          byId("lastUpdated").innerHTML =
+            "Updated " +
+            new Date().toLocaleTimeString() +
+            " · Auto-refresh " +
+            refreshSeconds +
+            "s";
+        }
+
+        window.refreshAll = refreshAll;
+        refreshAll(false);
+        refreshTimer = setInterval(function () {
+          refreshAll(false);
+        }, refreshSeconds * 1000);
+      })();
+    </script>
+  </body>
+</html>

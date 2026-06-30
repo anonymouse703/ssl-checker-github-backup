@@ -10,11 +10,27 @@ const { spawn } = require("child_process");
 const crypto = require("crypto");
 const { initPool, poolStats } = require("./utils/browser-pool");
 const { cleanupOldChromeBinaries } = require("./utils/tmp-cleanup");
-const { getUsage, recordScan, minutesUntilNextAllowed } = require("./utils/scan-usage");
+const {
+  getUsage,
+  recordScan,
+  minutesUntilNextAllowed,
+} = require("./utils/scan-usage");
+
+// Optional legacy recovery module. This supports the /recovery,
+// /resume-batch, and /mark-stopped endpoints used by recovery-monitor.html.
+// Put the uploaded recovery.js at: <TOOL_DIR>/utils/recovery.js
+let legacyRecovery = null;
+try {
+  legacyRecovery = require("./utils/recovery");
+  console.log("[api] legacy recovery module loaded: ./utils/recovery.js");
+} catch (e) {
+  console.warn("[api] legacy recovery module not loaded: " + e.message);
+}
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const TOOL_DIR = process.env.TOOL_DIR || "/usr/local/ind_leads/ssl-checker-tool";
+const TOOL_DIR =
+  process.env.TOOL_DIR || "/usr/local/ind_leads/ssl-checker-tool";
 const OUTPUT_DIR = process.env.OUTPUT_DIR || "/home/ind/ind_leads_inputs";
 const SCAN_ROOT = process.env.SCAN_ROOT || "/home/ind";
 
@@ -38,29 +54,40 @@ const API_BATCH_DIR = path.join(OUTPUT_DIR, "api_batches");
 const GLOBAL_FAILED_LOG_PATH = path.join(OUTPUT_DIR, "failed_scans.csv");
 const MAX_ACTIVE_RESERVED_DOMAINS = parseInt(
   process.env.MAX_ACTIVE_RESERVED_DOMAINS || "6",
-  10
+  10,
 );
 
 const activeJobs = new Map();
 const batchTimeWatchers = new Map();
-const BATCH_TIME_WATCH_MS = parseInt(process.env.BATCH_TIME_WATCH_MS || "1000", 10);
+const BATCH_TIME_WATCH_MS = parseInt(
+  process.env.BATCH_TIME_WATCH_MS || "1000",
+  10,
+);
 
-const ALL_TOOL_KEYS = [
-  'ssl',
-  'sucuri',
-  'pagespeed',
-  'pingdom',
-  'dns',
-  'pagerank',
-  'server',
-  'intodns',
+const DEFAULT_TOOL_KEYS = [
+  "ssl",
+  "sucuri",
+  "pagespeed",
+  "pingdom",
+  "dns",
+  "pagerank",
+  "server",
+  "intodns",
 ];
+
+// INDepthDNS is allowed, but it is no longer enabled by default.
+// FileMaker must explicitly send it in parsed.tools when needed.
+const ALL_TOOL_KEYS = [...DEFAULT_TOOL_KEYS, "indepthdns"];
 
 function normalizeSelectedTools(rawTools) {
   if (!Array.isArray(rawTools)) return [];
   const allowed = new Set(ALL_TOOL_KEYS);
   return rawTools
-    .map((v) => String(v || '').trim().toLowerCase())
+    .map((v) =>
+      String(v || "")
+        .trim()
+        .toLowerCase(),
+    )
     .filter((v) => allowed.has(v));
 }
 
@@ -80,7 +107,7 @@ initPool().catch((err) => {
   // Keep the API/monitor online even when Chrome/Puppeteer cannot start.
   // Scanner routes may fail until browser.js/browser-pool.js are fixed, but
   // /server-stats and FileMaker monitoring remain available.
-  if (String(process.env.API_EXIT_ON_BROWSER_POOL_FAIL || '0') === '1') {
+  if (String(process.env.API_EXIT_ON_BROWSER_POOL_FAIL || "0") === "1") {
     process.exit(1);
   }
 });
@@ -90,7 +117,11 @@ function jsonResponse(res, statusCode, data) {
   try {
     body = JSON.stringify(data ?? { ok: false, error: "Empty response body" });
   } catch (e) {
-    body = JSON.stringify({ ok: false, error: "JSON serialization failed", detail: e.message });
+    body = JSON.stringify({
+      ok: false,
+      error: "JSON serialization failed",
+      detail: e.message,
+    });
     statusCode = 500;
   }
 
@@ -108,7 +139,9 @@ function jsonResponse(res, statusCode, data) {
     res.end(body);
   } catch (e) {
     console.error(`[api] jsonResponse failed: ${e.message}`);
-    try { res.end(body); } catch (_) {}
+    try {
+      res.end(body);
+    } catch (_) {}
   }
 }
 
@@ -157,7 +190,6 @@ function writeJsonSafe(filePath, obj) {
   } catch (_) {}
 }
 
-
 const FAILED_LOG_HEADER = "time,domain,reason,source,batch_id,job_id";
 
 function csvEscape(value) {
@@ -181,20 +213,19 @@ function ensureFailedLogHeader(filePath) {
 
 function appendFailedScanLog(entry = {}) {
   const time = entry.time || nowIso();
-  const domain = sanitizeDomain(entry.domain || "") || String(entry.domain || "").trim();
-  const reason = String(entry.reason || "Unknown failure").replace(/\s+/g, " ").trim();
+  const domain =
+    sanitizeDomain(entry.domain || "") || String(entry.domain || "").trim();
+  const reason = String(entry.reason || "Unknown failure")
+    .replace(/\s+/g, " ")
+    .trim();
   const source = String(entry.source || "").trim();
   const batchId = String(entry.batchId || entry.batch_id || "").trim();
   const jobId = String(entry.jobId || entry.job_id || "").trim();
 
-  const row = [
-    time,
-    domain,
-    reason.slice(0, 1000),
-    source,
-    batchId,
-    jobId,
-  ].map(csvEscape).join(",") + "\n";
+  const row =
+    [time, domain, reason.slice(0, 1000), source, batchId, jobId]
+      .map(csvEscape)
+      .join(",") + "\n";
 
   ensureFailedLogHeader(GLOBAL_FAILED_LOG_PATH);
   appendTextSafe(GLOBAL_FAILED_LOG_PATH, row);
@@ -219,10 +250,16 @@ function inferFailureReasonFromLog(filePath, fallback = "Scan failed") {
       .filter(Boolean);
 
     const interesting = lines
-      .filter((line) => /(failed|failure|error|fatal|exception|timeout|timed out|cannot|unreachable|not reachable|denied|refused|crash|exit code|ERR_|❌|⚠️)/i.test(line))
+      .filter((line) =>
+        /(failed|failure|error|fatal|exception|timeout|timed out|cannot|unreachable|not reachable|denied|refused|crash|exit code|ERR_|❌|⚠️)/i.test(
+          line,
+        ),
+      )
       .filter((line) => !/^\[progress\]/i.test(line));
 
-    const picked = interesting.length ? interesting[interesting.length - 1] : lines[lines.length - 1];
+    const picked = interesting.length
+      ? interesting[interesting.length - 1]
+      : lines[lines.length - 1];
     return (picked || fallback).slice(0, 1000);
   } catch (_) {
     return fallback;
@@ -235,7 +272,7 @@ function collectFailedLogCsv(batchId = "", options = {}) {
   const limit = Math.max(1, parseInt(options.limit || "500", 10));
   const since = options.since ? new Date(options.since) : null;
 
-  const out  = [FAILED_LOG_HEADER];
+  const out = [FAILED_LOG_HEADER];
   const seen = new Set();
 
   function addFile(filePath) {
@@ -269,8 +306,10 @@ function collectFailedLogCsv(batchId = "", options = {}) {
     try {
       if (fs.existsSync(OUTPUT_DIR)) {
         for (const entry of fs.readdirSync(OUTPUT_DIR)) {
-          if (/^failed_.+\.csv$/i.test(entry) &&
-              entry !== path.basename(GLOBAL_FAILED_LOG_PATH)) {
+          if (
+            /^failed_.+\.csv$/i.test(entry) &&
+            entry !== path.basename(GLOBAL_FAILED_LOG_PATH)
+          ) {
             addFile(path.join(OUTPUT_DIR, entry));
           }
         }
@@ -280,7 +319,7 @@ function collectFailedLogCsv(batchId = "", options = {}) {
 
   // Keep only the most recent `limit` data rows so FileMaker never receives
   // a response large enough to hang Insert from URL
-  const header   = out[0];
+  const header = out[0];
   const dataRows = out.slice(1).slice(-limit);
   return [header, ...dataRows].join("\n") + "\n";
 }
@@ -288,14 +327,22 @@ function collectFailedLogCsv(batchId = "", options = {}) {
 // ── Trim the global failed-scan log to the last N rows ────────────────────────
 function trimFailedScanLog(keepRows = 1000) {
   try {
-    if (!fs.existsSync(GLOBAL_FAILED_LOG_PATH)) return { ok: true, trimmed: 0, kept: 0 };
-    const lines  = fs.readFileSync(GLOBAL_FAILED_LOG_PATH, "utf8")
-                     .split(/\r?\n/).filter(Boolean);
+    if (!fs.existsSync(GLOBAL_FAILED_LOG_PATH))
+      return { ok: true, trimmed: 0, kept: 0 };
+    const lines = fs
+      .readFileSync(GLOBAL_FAILED_LOG_PATH, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean);
     const header = lines[0] || FAILED_LOG_HEADER;
-    const rows   = lines.slice(1);
-    if (rows.length <= keepRows) return { ok: true, trimmed: 0, kept: rows.length };
+    const rows = lines.slice(1);
+    if (rows.length <= keepRows)
+      return { ok: true, trimmed: 0, kept: rows.length };
     const kept = rows.slice(-keepRows);
-    fs.writeFileSync(GLOBAL_FAILED_LOG_PATH, [header, ...kept].join("\n") + "\n", "utf8");
+    fs.writeFileSync(
+      GLOBAL_FAILED_LOG_PATH,
+      [header, ...kept].join("\n") + "\n",
+      "utf8",
+    );
     return { ok: true, trimmed: rows.length - kept.length, kept: kept.length };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -309,7 +356,9 @@ function nowIso() {
 const API_STARTED_AT = nowIso();
 
 function sanitizeDomain(raw) {
-  let s = String(raw || "").trim().toLowerCase();
+  let s = String(raw || "")
+    .trim()
+    .toLowerCase();
 
   s = s.replace(/^https?:\/\//i, "");
   s = s.replace(/^www\./i, "");
@@ -342,7 +391,7 @@ function uniqueDomainTargets(list) {
   const out = [];
   const seen = new Set();
   for (const item of list || []) {
-    const raw = String(item || '').trim();
+    const raw = String(item || "").trim();
     const domain = sanitizeDomain(raw);
     if (!domain || seen.has(domain)) continue;
     seen.add(domain);
@@ -378,6 +427,15 @@ function doneFlagPath(jobId) {
 }
 function latestPathFile(jobId) {
   return path.join(OUTPUT_DIR, `latest_path_${jobId}.txt`);
+}
+function safeWpFileKey(raw) {
+  return String(raw || "").replace(/[^a-z0-9._-]/gi, "_");
+}
+function wpStatusFileByJobId(jobId) {
+  return path.join(OUTPUT_DIR, `wp_${safeWpFileKey(jobId)}.json`);
+}
+function wpStatusFileByDomain(domain) {
+  return path.join(OUTPUT_DIR, `wp_${safeWpFileKey(sanitizeDomain(domain))}.json`);
 }
 function domainLockPath(domain) {
   return path.join(OUTPUT_DIR, `lock_${domain}.pid`);
@@ -423,7 +481,9 @@ function tryAcquireDomainLock(domain, pid, forceRescan = false) {
       const ownerPid = parseInt(readFileOrNull(lockFile) || "0", 10);
 
       if (!Number.isFinite(ownerPid) || ownerPid <= 0) {
-        try { fs.unlinkSync(lockFile); } catch (_) {}
+        try {
+          fs.unlinkSync(lockFile);
+        } catch (_) {}
         fs.writeFileSync(lockFile, String(pid), { flag: "wx" });
         return { ok: true, reason: "recovered_invalid_lock" };
       }
@@ -432,9 +492,15 @@ function tryAcquireDomainLock(domain, pid, forceRescan = false) {
         process.kill(ownerPid, 0);
         return { ok: false, reason: "active_lock", existingPid: ownerPid };
       } catch (_) {
-        try { fs.unlinkSync(lockFile); } catch (_) {}
+        try {
+          fs.unlinkSync(lockFile);
+        } catch (_) {}
         fs.writeFileSync(lockFile, String(pid), { flag: "wx" });
-        return { ok: true, reason: "recovered_stale_lock", previousPid: ownerPid };
+        return {
+          ok: true,
+          reason: "recovered_stale_lock",
+          previousPid: ownerPid,
+        };
       }
     } catch (_) {
       return { ok: false, reason: "lock_read_failed" };
@@ -448,7 +514,11 @@ function acquireBatchDomainLocks(domains, pid) {
 
   for (const item of domains) {
     const domain = typeof item === "string" ? item : item.domain;
-    const forceRescan = !!(item && typeof item === "object" && item.forceRescan);
+    const forceRescan = !!(
+      item &&
+      typeof item === "object" &&
+      item.forceRescan
+    );
 
     try {
       const result = tryAcquireDomainLock(domain, pid, forceRescan);
@@ -494,7 +564,11 @@ function findActiveJobForDomain(domain) {
       };
     }
 
-    if (job.type === "multi" && Array.isArray(job.domains) && job.domains.includes(domain)) {
+    if (
+      job.type === "multi" &&
+      Array.isArray(job.domains) &&
+      job.domains.includes(domain)
+    ) {
       return {
         busy: true,
         type: "multi",
@@ -514,7 +588,7 @@ function findActiveJobForDomain(domain) {
 function initJobProgressFile(jobId, domain, total) {
   writeTextSafe(
     progressFilePath(jobId),
-    `completed=0\ntotal=${total}\nlast_domain=${domain}\nlast_finish=\nstatus=STARTING\njob_id=${jobId}\ndomain=${domain}`
+    `completed=0\ntotal=${total}\nlast_domain=${domain}\nlast_finish=\nstatus=STARTING\njob_id=${jobId}\ndomain=${domain}`,
   );
   writeTextSafe(logFilePath(jobId), "");
 }
@@ -541,7 +615,11 @@ function saveBatchMeta(meta) {
 
 function saveBatchMetaStrict(meta) {
   ensureDir(API_BATCH_DIR);
-  fs.writeFileSync(batchMetaPath(meta.batchId), JSON.stringify(meta, null, 2), "utf8");
+  fs.writeFileSync(
+    batchMetaPath(meta.batchId),
+    JSON.stringify(meta, null, 2),
+    "utf8",
+  );
 }
 
 function isSafeBatchId(batchId) {
@@ -565,10 +643,11 @@ function readDomainsFromFile(filePath) {
   try {
     if (!filePath || !fs.existsSync(filePath)) return [];
     return uniqueDomains(
-      fs.readFileSync(filePath, "utf8")
+      fs
+        .readFileSync(filePath, "utf8")
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#"))
+        .filter((line) => line && !line.startsWith("#")),
     );
   } catch (_) {
     return [];
@@ -610,14 +689,20 @@ function cleanupBatchDomainListFile(batchId, savedMeta = null, job = null) {
     saveBatchMeta(meta);
 
     if (result.deleted) {
-      console.log(`[cleanup] deleted domain list for batch=${batchId}: ${filePath}`);
+      console.log(
+        `[cleanup] deleted domain list for batch=${batchId}: ${filePath}`,
+      );
     } else {
-      console.log(`[cleanup] domain list not deleted for batch=${batchId}: ${result.reason || result.error || "unknown"}`);
+      console.log(
+        `[cleanup] domain list not deleted for batch=${batchId}: ${result.reason || result.error || "unknown"}`,
+      );
     }
 
     return result;
   } catch (e) {
-    console.error(`[cleanup] domain-list cleanup failed batch=${batchId}: ${e.stack || e.message}`);
+    console.error(
+      `[cleanup] domain-list cleanup failed batch=${batchId}: ${e.stack || e.message}`,
+    );
     return { deleted: false, error: e.message };
   }
 }
@@ -633,7 +718,8 @@ function domainsForBatch(batchId, job = null, meta = null) {
   const paths = [];
   if (job && job.domainListFile) paths.push(job.domainListFile);
   if (meta && meta.domainListFile) paths.push(meta.domainListFile);
-  if (batchId && isSafeBatchId(batchId)) paths.push(queuedDomainListPath(batchId));
+  if (batchId && isSafeBatchId(batchId))
+    paths.push(queuedDomainListPath(batchId));
 
   // While the batch is running, prefer the temp file because /multi-enqueue
   // and multi-audit.js can live-tail domains added to the file.
@@ -655,13 +741,12 @@ function domainsForBatch(batchId, job = null, meta = null) {
   return [];
 }
 
-
 function batchChildJobId(batchId, domain) {
-  return `${batchId}_${String(domain || '').replace(/[^a-z0-9._-]/gi, '_')}`;
+  return `${batchId}_${String(domain || "").replace(/[^a-z0-9._-]/gi, "_")}`;
 }
 
 function batchRootFromLatestPathText(latestPathText) {
-  const latestPath = String(latestPathText || '').trim();
+  const latestPath = String(latestPathText || "").trim();
   if (!latestPath) return null;
 
   // latest_path_<job>.txt normally points to:
@@ -677,7 +762,8 @@ function resolveBatchRootForMultiResult(batchId, meta = null) {
   // 0) FIX: api-server now stores scanBatchPath/batchRoot in meta at spawn time.
   //    Check this first — it's reliable and avoids the entire latest_path traversal
   //    when the batch root is already known.
-  const metaRootDirect = meta && (meta.scanBatchPath || meta.batchRoot || meta.batchPath);
+  const metaRootDirect =
+    meta && (meta.scanBatchPath || meta.batchRoot || meta.batchPath);
   if (metaRootDirect && fs.existsSync(metaRootDirect)) return metaRootDirect;
 
   // 1) Backward-compatible direct latest_path_<batchId>.txt.
@@ -707,36 +793,88 @@ function resolveBatchRootForMultiResult(batchId, meta = null) {
   return null;
 }
 
-function buildDomainStatusList(domains, progress = null, running = false, meta = null, resultDomainSet = null) {
-  const completedSet = new Set(splitProgressList(progress && progress.completed_domains));
-  const failedSet = new Set(splitProgressList(progress && progress.failed_domains));
-  const resultSet = resultDomainSet instanceof Set ? resultDomainSet : new Set();
+function buildDomainStatusList(
+  domains,
+  progress = null,
+  running = false,
+  meta = null,
+  resultDomainSet = null,
+) {
+  const completedSet = new Set(
+    splitProgressList(progress && progress.completed_domains),
+  );
+  const failedSet = new Set(
+    splitProgressList(progress && progress.failed_domains),
+  );
+  const resultSet =
+    resultDomainSet instanceof Set ? resultDomainSet : new Set();
   const currentDomain = sanitizeDomain(progress && progress.current_domain);
   const metaStatus = String((meta && meta.status) || "").toUpperCase();
 
-  const total = parseInt((progress && progress.total) || (meta && (meta.totalQueued || meta.domainCount)) || (domains && domains.length) || "0", 10) || 0;
+  const total =
+    parseInt(
+      (progress && progress.total) ||
+        (meta && (meta.totalQueued || meta.domainCount)) ||
+        (domains && domains.length) ||
+        "0",
+      10,
+    ) || 0;
   const completed = parseInt((progress && progress.completed) || "0", 10) || 0;
-  const batchDone = !running &&
-    (metaStatus === "DONE" || metaStatus === "FINISHED" || metaStatus === "COMPLETE" || metaStatus === "COMPLETED") &&
+  const batchDone =
+    !running &&
+    (metaStatus === "DONE" ||
+      metaStatus === "FINISHED" ||
+      metaStatus === "COMPLETE" ||
+      metaStatus === "COMPLETED") &&
     (total <= 0 || completed >= total);
+
+  const interruptedLike =
+    metaStatus === "INTERRUPTED" ||
+    metaStatus === "RECOVERING" ||
+    metaStatus === "STOPPED";
 
   return (domains || []).map((domain) => {
     const d = sanitizeDomain(domain);
     let status = "queued";
 
+    // When Node/PM2/server died mid-batch, the domain that was active at the
+    // last progress write should be visible as stopped instead of queued.
+    // Result/progress evidence below still wins, so already-finished domains
+    // are not incorrectly marked stopped.
+
     // Result CSV is the same evidence FileMaker uses before it marks Upload = done.
     // A real/fallback result row must beat failed_domains so FileMaker can import it.
     // failed_domains only means "needs fallback upload" when no row exists yet.
     if (resultSet.has(d)) {
+      // Confirmed result CSV on disk — safe for FileMaker to import.
       status = "done";
-    } else if (completedSet.has(d) || batchDone) {
-      // The scanner says the domain finished, but /multi-result must not mark it
-      // uploadable until a CSV/result row exists. FileMaker should keep polling.
-      status = "finalizing";
+    } else if (completedSet.has(d)) {
+      // multi-audit wrote this domain to completed_domains, so a result row
+      // should exist soon. Keep as "finalizing" only while the batch is still
+      // running (brief disk-flush race). Once the batch is DONE, multi-audit.js
+      // guarantees every domain has a real or fallback CSV, so treat it as done
+      // immediately so FileMaker can retrieve and import it without waiting for
+      // another full resultDomainsForBatch re-scan.
+      status = batchDone ? "done" : "finalizing";
     } else if (failedSet.has(d)) {
+      // Scanner explicitly logged this domain as failed.
+      status = "failed";
+    } else if (batchDone) {
+      // Batch is complete but this domain has no CSV, no completed entry and
+      // no failed entry. multi-audit.js always writes a fallback row, so this
+      // should not happen in normal operation. Mark "failed" so FileMaker can
+      // trigger the terminal-status upload path and clean up the record instead
+      // of leaving it stuck in "Still On Process" indefinitely.
       status = "failed";
     } else if (running && currentDomain && d === currentDomain) {
       status = "processing";
+    } else if (
+      !running &&
+      interruptedLike &&
+      currentDomain &&
+      d === currentDomain
+    ) {
+      status = "stopped";
     }
 
     return { domain: d, status };
@@ -753,14 +891,23 @@ function formatProcessDuration(ms) {
   return `${hours}h ${minutes % 60}m`;
 }
 
-function withDomainProcessTimes(batchId, domainStatuses, running = false, meta = null) {
+function withDomainProcessTimes(
+  batchId,
+  domainStatuses,
+  running = false,
+  meta = null,
+) {
   if (!Array.isArray(domainStatuses)) return [];
   if (!batchId) return domainStatuses;
 
   const saved = meta || getBatchMeta(batchId) || null;
   if (!saved) return domainStatuses;
 
-  if (!saved.domainTimes || typeof saved.domainTimes !== "object" || Array.isArray(saved.domainTimes)) {
+  if (
+    !saved.domainTimes ||
+    typeof saved.domainTimes !== "object" ||
+    Array.isArray(saved.domainTimes)
+  ) {
     saved.domainTimes = {};
   }
 
@@ -775,7 +922,12 @@ function withDomainProcessTimes(batchId, domainStatuses, running = false, meta =
     const status = String(item.status || "queued").toLowerCase();
     const rec = saved.domainTimes[d] || {};
 
-    if (status === "processing" || status === "scanning" || status === "running" || status === "checking") {
+    if (
+      status === "processing" ||
+      status === "scanning" ||
+      status === "running" ||
+      status === "checking"
+    ) {
       if (!rec.startedAt) {
         rec.startedAt = nowIsoText;
         changed = true;
@@ -785,7 +937,11 @@ function withDomainProcessTimes(batchId, domainStatuses, running = false, meta =
         changed = true;
       }
       rec.lastSeenAt = nowIsoText;
-    } else if ((status === "done" || status === "failed") && rec.startedAt && !rec.finishedAt) {
+    } else if (
+      (status === "done" || status === "failed") &&
+      rec.startedAt &&
+      !rec.finishedAt
+    ) {
       rec.finishedAt = nowIsoText;
       changed = true;
     }
@@ -795,14 +951,26 @@ function withDomainProcessTimes(batchId, domainStatuses, running = false, meta =
     }
 
     const startMs = Date.parse(rec.startedAt || "");
-    const finishMs = (status === "processing" || status === "scanning" || status === "running" || status === "checking")
-      ? nowMs
-      : Date.parse(rec.finishedAt || "");
+    const finishMs =
+      status === "processing" ||
+      status === "scanning" ||
+      status === "running" ||
+      status === "checking"
+        ? nowMs
+        : Date.parse(rec.finishedAt || "");
 
     item.started_at = rec.startedAt || null;
     item.finished_at = rec.finishedAt || null;
 
-    if (!Number.isNaN(startMs) && !Number.isNaN(finishMs) && ((status === "processing" || status === "scanning" || status === "running" || status === "checking") || rec.finishedAt)) {
+    if (
+      !Number.isNaN(startMs) &&
+      !Number.isNaN(finishMs) &&
+      (status === "processing" ||
+        status === "scanning" ||
+        status === "running" ||
+        status === "checking" ||
+        rec.finishedAt)
+    ) {
       item.process_time_ms = Math.max(0, finishMs - startMs);
       item.process_time = formatProcessDuration(item.process_time_ms);
     } else {
@@ -814,13 +982,20 @@ function withDomainProcessTimes(batchId, domainStatuses, running = false, meta =
   }
 
   if (changed && saved.batchId) {
-    try { saveBatchMeta(saved); } catch (_) {}
+    try {
+      saveBatchMeta(saved);
+    } catch (_) {}
   }
 
   return domainStatuses;
 }
 
-function updateBatchDomainTimesFromProgress(batchId, progress = null, running = false, meta = null) {
+function updateBatchDomainTimesFromProgress(
+  batchId,
+  progress = null,
+  running = false,
+  meta = null,
+) {
   if (!batchId) return [];
 
   const saved = meta || getBatchMeta(batchId) || null;
@@ -829,7 +1004,13 @@ function updateBatchDomainTimesFromProgress(batchId, progress = null, running = 
   const liveProgress = progress || readProgress(batchId) || null;
   const domains = domainsForBatch(batchId, null, saved);
   const resultSet = resultDomainsForBatch(batchId, saved);
-  const statuses = buildDomainStatusList(domains, liveProgress, running, saved, resultSet);
+  const statuses = buildDomainStatusList(
+    domains,
+    liveProgress,
+    running,
+    saved,
+    resultSet,
+  );
   return withDomainProcessTimes(batchId, statuses, running, saved);
 }
 
@@ -845,15 +1026,23 @@ function startBatchTimeWatcher(batchId) {
     try {
       updateBatchDomainTimesFromProgress(batchId, progress, running, meta);
     } catch (err) {
-      console.error(`[api] domain time watcher failed batch_id=${batchId}: ${err.message}`);
+      console.error(
+        `[api] domain time watcher failed batch_id=${batchId}: ${err.message}`,
+      );
     }
 
     const metaStatus = String((meta && meta.status) || "").toUpperCase();
-    const progressStatus = String((progress && progress.status) || "").toUpperCase();
-    const finished = !running && (
-      metaStatus === "DONE" || metaStatus === "ERROR" || metaStatus === "FINISHED" || metaStatus === "COMPLETE" || metaStatus === "COMPLETED" ||
-      progressStatus.indexOf("DONE") === 0
-    );
+    const progressStatus = String(
+      (progress && progress.status) || "",
+    ).toUpperCase();
+    const finished =
+      !running &&
+      (metaStatus === "DONE" ||
+        metaStatus === "ERROR" ||
+        metaStatus === "FINISHED" ||
+        metaStatus === "COMPLETE" ||
+        metaStatus === "COMPLETED" ||
+        progressStatus.indexOf("DONE") === 0);
 
     if (finished) {
       stopBatchTimeWatcher(batchId);
@@ -873,18 +1062,656 @@ function stopBatchTimeWatcher(batchId) {
 
 function finalizeBatchTimeWatcher(batchId, meta = null) {
   try {
-    updateBatchDomainTimesFromProgress(batchId, readProgress(batchId), false, meta || getBatchMeta(batchId));
+    updateBatchDomainTimesFromProgress(
+      batchId,
+      readProgress(batchId),
+      false,
+      meta || getBatchMeta(batchId),
+    );
   } catch (err) {
-    console.error(`[api] final domain time update failed batch_id=${batchId}: ${err.message}`);
+    console.error(
+      `[api] final domain time update failed batch_id=${batchId}: ${err.message}`,
+    );
   }
   stopBatchTimeWatcher(batchId);
 }
 
+// ── Recovery helpers ─────────────────────────────────────────────────────────
+// These endpoints let FileMaker show interrupted batches after a VM/API restart
+// and continue scanning without re-running domains that already have results.
+
+function checkpointFilePath(jobId) {
+  return path.join(OUTPUT_DIR, `checkpoint_${jobId}.json`);
+}
+
+function isPidAlive(pid) {
+  const n = parseInt(pid || "0", 10);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function listBatchMetaRecords() {
+  const out = [];
+  try {
+    if (!fs.existsSync(API_BATCH_DIR)) return out;
+    for (const name of fs.readdirSync(API_BATCH_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(API_BATCH_DIR, name);
+      const meta = readJsonOrNull(file);
+      if (!meta || !meta.batchId || !isSafeBatchId(meta.batchId)) continue;
+      out.push({ meta, file });
+    }
+  } catch (e) {
+    console.error(`[recovery] listBatchMetaRecords failed: ${e.message}`);
+  }
+  return out;
+}
+
+function terminalBatchStatusForRecovery(status) {
+  const s = String(status || "").toUpperCase();
+  return (
+    s === "DONE" ||
+    s === "FINISHED" ||
+    s === "COMPLETE" ||
+    s === "COMPLETED" ||
+    s === "CANCELLED" ||
+    s === "CANCELED"
+  );
+}
+
+function recoverableBatchStatus(status) {
+  const s = String(status || "").toUpperCase();
+  return (
+    s === "RUNNING" ||
+    s === "STARTING" ||
+    s === "PROCESSING" ||
+    s === "SCANNING" ||
+    s === "ACTIVE" ||
+    s === "WAITING_GAP" ||
+    s === "QUEUED" ||
+    s === "PENDING" ||
+    s === "INTERRUPTED" ||
+    s === "STOPPED" ||
+    s === "ERROR" ||
+    s === "RECOVERING"
+  );
+}
+
+function completedDomainSetForBatch(batchId, meta = null, progress = null) {
+  const set = new Set();
+  const p = progress || readProgress(batchId) || {};
+  for (const d of splitProgressList(p.completed_domains || "")) set.add(d);
+  try {
+    const resultSet = resultDomainsForBatch(batchId, meta);
+    for (const d of resultSet) set.add(d);
+  } catch (_) {}
+  return set;
+}
+
+function failedDomainSetForBatch(batchId, progress = null) {
+  const set = new Set();
+  const p = progress || readProgress(batchId) || {};
+  for (const d of splitProgressList(p.failed_domains || "")) set.add(d);
+  return set;
+}
+
+function writeCheckpointForBatch(batchId, doneDomains) {
+  const done = uniqueDomains(doneDomains || []);
+  writeJsonSafe(checkpointFilePath(batchId), {
+    done,
+    savedAt: nowIso(),
+    source: "api-recovery",
+  });
+  return done;
+}
+
+function buildRecoveryDomainStatuses(batchId, meta = null) {
+  const job = activeJobs.get(`multi:${batchId}`) || null;
+  const progress = readProgress(batchId) || null;
+  const running = !!job;
+  const domains = domainsForBatch(batchId, job, meta);
+  const completedSet = completedDomainSetForBatch(batchId, meta, progress);
+  const failedSet = failedDomainSetForBatch(batchId, progress);
+  const currentDomain = sanitizeDomain(progress && progress.current_domain);
+  const metaStatus = String((meta && meta.status) || "").toUpperCase();
+  const interruptedLike =
+    !running &&
+    (metaStatus === "INTERRUPTED" ||
+      metaStatus === "STOPPED" ||
+      metaStatus === "ERROR" ||
+      metaStatus === "RECOVERING");
+
+  return domains.map((domain) => {
+    const d = sanitizeDomain(domain);
+    let status = "queued";
+    if (completedSet.has(d)) status = "done";
+    else if (failedSet.has(d)) status = "failed";
+    else if (running && currentDomain && d === currentDomain)
+      status = "scanning";
+    else if (interruptedLike && currentDomain && d === currentDomain)
+      status = "stopped";
+    return { domain: d, status };
+  });
+}
+
+function countRecoveryStatuses(statuses) {
+  const c = {
+    total: statuses.length,
+    done: 0,
+    failed: 0,
+    stopped: 0,
+    queued: 0,
+    scanning: 0,
+    remaining: 0,
+  };
+  for (const item of statuses || []) {
+    const s = String(item.status || "queued").toLowerCase();
+    if (s === "done") c.done++;
+    else if (s === "failed") c.failed++;
+    else if (s === "stopped") c.stopped++;
+    else if (s === "scanning" || s === "processing" || s === "running")
+      c.scanning++;
+    else c.queued++;
+  }
+  c.remaining = c.total - c.done;
+  return c;
+}
+
+function recoverySummaryForBatch(metaRecord) {
+  const meta = metaRecord && metaRecord.meta ? metaRecord.meta : metaRecord;
+  if (!meta || !meta.batchId || !isSafeBatchId(meta.batchId)) return null;
+
+  const batchId = meta.batchId;
+  const job = activeJobs.get(`multi:${batchId}`) || null;
+  const running = !!job;
+  const progress = readProgress(batchId) || null;
+  const domains = domainsForBatch(batchId, job, meta);
+  const statuses = buildRecoveryDomainStatuses(batchId, meta);
+  const counts = countRecoveryStatuses(statuses);
+  const status = String(meta.status || "QUEUED").toUpperCase();
+  const progressStatus = String((progress && progress.status) || "");
+
+  if (terminalBatchStatusForRecovery(status)) return null;
+  if (!recoverableBatchStatus(status) && !progress) return null;
+  if (!domains.length && !counts.total) return null;
+  if (counts.remaining <= 0) return null;
+
+  let recoveryStatus = running ? "running" : status.toLowerCase();
+  if (
+    !running &&
+    (status === "RUNNING" ||
+      status === "STARTING" ||
+      status === "PROCESSING" ||
+      status === "SCANNING" ||
+      status === "ACTIVE" ||
+      status === "WAITING_GAP" ||
+      status === "RECOVERING")
+  ) {
+    recoveryStatus = "interrupted";
+  } else if (!running && status === "ERROR") {
+    recoveryStatus = "interrupted";
+  } else if (!running && status === "STOPPED") {
+    recoveryStatus = "stopped";
+  } else if (!running && (status === "QUEUED" || status === "PENDING")) {
+    recoveryStatus = "queued";
+  }
+
+  const currentDomain = sanitizeDomain(progress && progress.current_domain);
+  const pct =
+    counts.total > 0 ? Math.round((counts.done / counts.total) * 1000) / 10 : 0;
+  const lastUpdated =
+    meta.lastHeartbeatAt ||
+    meta.interruptedAt ||
+    meta.finishedAt ||
+    meta.startedAt ||
+    meta.queuedAt ||
+    meta.enqueuedAt ||
+    meta.createdAt ||
+    null;
+
+  return {
+    type: "multi",
+    batch_id: batchId,
+    server_name: meta.serverName || meta.server_name || "",
+    status: recoveryStatus,
+    raw_status: status,
+    progress_status: progressStatus,
+    running,
+    pid: running ? job && job.pid : meta.childPid || null,
+    started_at: meta.startedAt || meta.queuedAt || meta.enqueuedAt || null,
+    updated_at: lastUpdated,
+    interrupted_at: meta.interruptedAt || null,
+    current_domain: currentDomain || null,
+    trigger:
+      meta.interruptReason ||
+      meta.error ||
+      (recoveryStatus === "interrupted" ? "API_OR_SERVER_RESTART" : ""),
+    total: counts.total,
+    completed: counts.done,
+    failed: counts.failed,
+    stopped: counts.stopped,
+    queued: counts.queued,
+    scanning: counts.scanning,
+    remaining: counts.remaining,
+    percent: pct,
+    domain_statuses: statuses,
+    sample_domains: statuses.filter((x) => x.status !== "done").slice(0, 25),
+    domain_list_file: meta.domainListFile || null,
+    scan_batch_path: meta.scanBatchPath || meta.batchRoot || null,
+    tools: meta.tools || [],
+    minutes_gap:
+      meta.minutesGap ||
+      (meta.scanSettings && meta.scanSettings.minutes_gap) ||
+      null,
+  };
+}
+
+function markRecoverableBatchesAtStartup() {
+  const marked = [];
+  const skipped = [];
+  for (const rec of listBatchMetaRecords()) {
+    const meta = rec.meta;
+    const batchId = meta.batchId;
+    const status = String(meta.status || "").toUpperCase();
+    if (terminalBatchStatusForRecovery(status)) {
+      skipped.push({ batch_id: batchId, status, reason: "terminal" });
+      continue;
+    }
+    if (!recoverableBatchStatus(status)) {
+      skipped.push({
+        batch_id: batchId,
+        status,
+        reason: "not recoverable status",
+      });
+      continue;
+    }
+    if (activeJobs.has(`multi:${batchId}`)) continue;
+
+    const summary = recoverySummaryForBatch(meta);
+    if (!summary) {
+      skipped.push({
+        batch_id: batchId,
+        status,
+        reason: "no remaining domains",
+      });
+      continue;
+    }
+
+    // Only convert active-looking orphaned batches to INTERRUPTED.
+    // Pure QUEUED/PENDING batches stay queued so the user can start them.
+    if (
+      status === "RUNNING" ||
+      status === "STARTING" ||
+      status === "PROCESSING" ||
+      status === "SCANNING" ||
+      status === "ACTIVE" ||
+      status === "WAITING_GAP" ||
+      status === "RECOVERING" ||
+      status === "ERROR"
+    ) {
+      meta.previousStatus = status;
+      meta.status = "INTERRUPTED";
+      meta.interruptedAt = meta.interruptedAt || nowIso();
+      meta.interruptReason = meta.interruptReason || "API_OR_SERVER_RESTART";
+      try {
+        saveBatchMeta(meta);
+      } catch (_) {}
+      marked.push({
+        batch_id: batchId,
+        previous_status: status,
+        remaining: summary.remaining,
+      });
+    }
+  }
+  return { marked, skipped };
+}
+
+function listInterruptedSingleJobs() {
+  const out = [];
+  try {
+    if (!fs.existsSync(OUTPUT_DIR)) return out;
+    for (const name of fs.readdirSync(OUTPUT_DIR)) {
+      const m = name.match(/^progress_(.+)\.txt$/);
+      if (!m) continue;
+      const jobId = m[1];
+      if (jobId.startsWith("batch_") && getBatchMeta(jobId)) continue;
+      if (fs.existsSync(doneFlagPath(jobId))) continue;
+      const p = readProgress(jobId);
+      if (!p) continue;
+      const domain = sanitizeDomain(
+        p.domain || p.last_domain || p.current_domain || "",
+      );
+      if (!domain) continue;
+      let running = false;
+      for (const job of activeJobs.values()) {
+        if (job.type === "single" && job.jobId === jobId) running = true;
+      }
+      if (running) continue;
+      const status = String(p.status || "").toUpperCase();
+      if (status.indexOf("DONE") === 0) continue;
+      out.push({
+        type: "single",
+        job_id: jobId,
+        domain,
+        status: "interrupted",
+        raw_status: status || "UNKNOWN",
+        total: 1,
+        completed: 0,
+        remaining: 1,
+        percent: 0,
+        current_domain: domain,
+        progress_status: p.status || "",
+        started_at: null,
+        updated_at: null,
+        trigger: "API_OR_SERVER_RESTART",
+        domain_statuses: [{ domain, status: "stopped" }],
+        sample_domains: [{ domain, status: "stopped" }],
+      });
+    }
+  } catch (e) {
+    console.error(`[recovery] listInterruptedSingleJobs failed: ${e.message}`);
+  }
+  return out;
+}
+
+function spawnRecoveredSingleJob(domain, jobId, options = {}) {
+  const safeDomain = sanitizeDomain(domain);
+  if (!safeDomain) return { ok: false, error: "Missing domain" };
+  if (!jobId || !/^[A-Za-z0-9._-]+$/.test(String(jobId)))
+    return { ok: false, error: "Invalid job_id" };
+
+  const jobKey = `single:${safeDomain}`;
+  if (activeJobs.has(jobKey))
+    return { ok: false, error: "Single job is already running", status: 409 };
+
+  const tools = normalizeSelectedTools(options.tools || []);
+  const enabledTools = tools.length ? tools : DEFAULT_TOOL_KEYS;
+  const minutesGap =
+    parseFloat(options.minutes_gap || process.env.MINUTES_GAP || "0") || 0;
+  const maxConcurrent =
+    parseInt(options.max_concurrent || process.env.MAX_CONCURRENT || "3", 10) ||
+    3;
+  const launchDelay =
+    minutesGap > 0 ? Math.round(minutesGap * 60 * 1000) : 3000;
+  const effectiveMax = minutesGap > 0 ? 1 : Math.max(1, maxConcurrent);
+
+  initJobProgressFile(jobId, safeDomain, 1);
+
+  const child = spawn("node", ["index.js", safeDomain], {
+    cwd: TOOL_DIR,
+    env: {
+      ...process.env,
+      PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH,
+      JOB_ID: jobId,
+      BROWSER_POOL_SKIP: "1",
+      ENABLED_TOOLS: JSON.stringify(enabledTools),
+      FORCE_RESCAN: "0",
+      TARGET_RAW_URL: safeDomain,
+      MINUTES_GAP: String(minutesGap),
+      DOMAIN_LAUNCH_DELAY_MS: String(launchDelay),
+      MAX_CONCURRENT: String(effectiveMax),
+      RECOVERY_CONTINUE: "1",
+    },
+    detached: false,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const logFile = logFilePath(jobId);
+  child.stdout.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+  child.stderr.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+
+  activeJobs.set(jobKey, {
+    key: jobKey,
+    type: "single",
+    domain: safeDomain,
+    tools: enabledTools,
+    jobId,
+    pid: child.pid,
+    startedAt: nowIso(),
+    logFile,
+    recovery: true,
+  });
+
+  child.on("exit", (code, signal) => {
+    writeTextSafe(
+      doneFlagPath(jobId),
+      `done\ncode=${code}\nsignal=${signal}\nfinishedAt=${nowIso()}\ndomain=${safeDomain}\nrecovery=1`,
+    );
+    releaseDomainLock(safeDomain, child.pid);
+    activeJobs.delete(jobKey);
+    if (code !== 0 || signal) {
+      appendFailedScanLog({
+        domain: safeDomain,
+        reason: inferFailureReasonFromLog(
+          logFile,
+          `Recovered single scan failed. code=${code} signal=${signal || ""}`,
+        ),
+        source: "single_recovery",
+        jobId,
+      });
+    }
+  });
+
+  return { ok: true, domain: safeDomain, job_id: jobId, pid: child.pid };
+}
+
+function spawnRecoveredMultiBatch(batchId, options = {}) {
+  if (!isSafeBatchId(batchId))
+    return { ok: false, error: "Invalid batch_id", status: 400 };
+  const batchKey = `multi:${batchId}`;
+  if (activeJobs.has(batchKey))
+    return { ok: false, error: "Batch is already running", status: 409 };
+
+  const meta = getBatchMeta(batchId);
+  if (!meta) return { ok: false, error: "Batch not found", status: 404 };
+
+  const domains = domainsForBatch(batchId, null, meta);
+  if (!domains.length)
+    return { ok: false, error: "No domains found for this batch", status: 400 };
+
+  const statuses = buildRecoveryDomainStatuses(batchId, meta);
+  const counts = countRecoveryStatuses(statuses);
+  if (counts.remaining <= 0)
+    return {
+      ok: false,
+      error: "No remaining domains to continue",
+      status: 409,
+    };
+
+  const doneDomains = statuses
+    .filter((x) => x.status === "done")
+    .map((x) => x.domain);
+  writeCheckpointForBatch(batchId, doneDomains);
+
+  const domainListFilePath =
+    meta.domainListFile && fs.existsSync(meta.domainListFile)
+      ? meta.domainListFile
+      : queuedDomainListPath(batchId);
+
+  try {
+    ensureDir(path.dirname(domainListFilePath));
+    fs.writeFileSync(domainListFilePath, domains.join("\n") + "\n", "utf8");
+  } catch (e) {
+    return {
+      ok: false,
+      error: "Could not write recovery domain list: " + e.message,
+      status: 500,
+    };
+  }
+
+  const enabledTools =
+    Array.isArray(meta.tools) && meta.tools.length ? meta.tools : DEFAULT_TOOL_KEYS;
+  const scanSettings = meta.scanSettings || {};
+  const minutesGap =
+    parseFloat(
+      options.minutes_gap ||
+        meta.minutesGap ||
+        scanSettings.minutes_gap ||
+        process.env.MINUTES_GAP ||
+        "0",
+    ) || 0;
+  const maxConc =
+    parseInt(
+      options.max_concurrent ||
+        scanSettings.max_concurrent ||
+        process.env.MAX_CONCURRENT ||
+        "3",
+      10,
+    ) || 3;
+  const launchDelay =
+    minutesGap > 0 ? Math.round(minutesGap * 60 * 1000) : 3000;
+  const effectiveMax = minutesGap > 0 ? 1 : Math.max(1, maxConc);
+
+  const startedAt = nowIso();
+  meta.previousStatus = meta.status;
+  meta.status = "RUNNING";
+  meta.recoveredAt = startedAt;
+  meta.recoveryCount = (parseInt(meta.recoveryCount || "0", 10) || 0) + 1;
+  meta.totalQueued = domains.length;
+  meta.domainCount = domains.length;
+  meta.domainListFile = domainListFilePath;
+  meta.minutesGap = minutesGap;
+  delete meta.finishedAt;
+  delete meta.error;
+
+  // FIX: Always update scanBatchPath to today's folder when a recovery spawns.
+  //
+  // The original scan may have run on a different day (e.g. 2026-06-01).
+  // meta.scanBatchPath still holds that old date folder.  multi-audit.js
+  // resolves its own output path as SCAN_ROOT + today's date, so recovered
+  // results land in a NEW date folder (e.g. 2026-06-22).
+  //
+  // resolveBatchRootForMultiResult() checks meta.scanBatchPath first (step 0).
+  // If the old folder still exists on disk (periodic cleanup only runs after 7
+  // days), it is returned immediately and /multi-result never sees the new
+  // results — causing FileMaker to keep retrying and never upload anything.
+  //
+  // Unconditionally setting the path here ensures /multi-result always looks
+  // in the folder where multi-audit.js actually wrote the recovered results.
+  {
+    const n = new Date();
+    const pad = (v) => String(v).padStart(2, "0");
+    const todayFolder = `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())}`;
+    meta.scanBatchPath = path.join(SCAN_ROOT, todayFolder);
+    meta.batchRoot = meta.scanBatchPath;
+  }
+  saveBatchMeta(meta);
+
+  const child = spawn("node", ["multi-audit.js", domainListFilePath], {
+    cwd: TOOL_DIR,
+    env: {
+      ...process.env,
+      PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH,
+      SCAN_BATCH_ID: batchId,
+      JOB_ID: batchId,
+      ENABLED_TOOLS: JSON.stringify(enabledTools),
+      FORCE_RESCAN: "0",
+      MINUTES_GAP: String(minutesGap),
+      DOMAIN_LAUNCH_DELAY_MS: String(launchDelay),
+      MAX_CONCURRENT: String(effectiveMax),
+      DOMAIN_LIST_FILE: domainListFilePath,
+      RECOVERY_CONTINUE: "1",
+    },
+    detached: false,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  meta.childPid = child.pid;
+  saveBatchMeta(meta);
+
+  const logFile = logFilePath(batchId);
+  child.stdout.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+  child.stderr.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+
+  activeJobs.set(batchKey, {
+    key: batchKey,
+    type: "multi",
+    batchId,
+    domains,
+    domainCount: domains.length,
+    domainListFile: domainListFilePath,
+    tools: enabledTools,
+    jobId: batchId,
+    pid: child.pid,
+    startedAt,
+    logFile,
+    recovery: true,
+  });
+  startBatchTimeWatcher(batchId);
+
+  child.on("error", (err) => {
+    appendTextSafe(
+      logFile,
+      `[recovery-child-error] ${err.stack || err.message}\n`,
+    );
+  });
+
+  child.on("exit", (code, signal) => {
+    const jobBeforeDelete = activeJobs.get(batchKey) || null;
+    activeJobs.delete(batchKey);
+    const saved = getBatchMeta(batchId) || meta;
+    saved.status = code === 0 ? "DONE" : "ERROR";
+    saved.exitCode = code;
+    saved.signal = signal;
+    saved.finishedAt = nowIso();
+    saveBatchMeta(saved);
+
+    if (code !== 0 || signal) {
+      const reason = inferFailureReasonFromLog(
+        logFile,
+        `Recovered multi scan failed. code=${code} signal=${signal || ""}`,
+      );
+      for (const d of domains || []) {
+        appendFailedScanLog({
+          domain: d,
+          reason,
+          source: "multi_recovery",
+          batchId,
+          jobId: batchId,
+        });
+      }
+    }
+
+    finalizeBatchTimeWatcher(batchId, saved);
+    if (code === 0) cleanupBatchDomainListFile(batchId, saved, jobBeforeDelete);
+  });
+
+  try {
+    recordScan(Math.max(1, counts.remaining));
+  } catch (_) {}
+
+  return {
+    ok: true,
+    batch_id: batchId,
+    pid: child.pid,
+    resumed_at: startedAt,
+    total: counts.total,
+    completed: counts.done,
+    remaining: counts.remaining,
+    domain_list_file: domainListFilePath,
+    // Extra fields so FileMaker "Recovery - Continue Scan" can use them
+    // without needing a separate lookup.
+    server_name: meta.serverName || meta.server_name || "",
+    tools: meta.tools || [],
+  };
+}
 
 function isFinalBatchStatus(status) {
   const s = String(status || "").toUpperCase();
-  return s === "DONE" || s === "ERROR" || s === "FAILED" || s === "STOPPED" ||
-    s === "FINISHED" || s === "COMPLETE" || s === "COMPLETED";
+  return (
+    s === "DONE" ||
+    s === "ERROR" ||
+    s === "FAILED" ||
+    s === "STOPPED" ||
+    s === "FINISHED" ||
+    s === "COMPLETE" ||
+    s === "COMPLETED"
+  );
 }
 
 function listVisibleQueuedBatchMetas() {
@@ -892,7 +1719,8 @@ function listVisibleQueuedBatchMetas() {
   try {
     if (!fs.existsSync(API_BATCH_DIR)) return out;
 
-    const files = fs.readdirSync(API_BATCH_DIR)
+    const files = fs
+      .readdirSync(API_BATCH_DIR)
       .filter((name) => name.endsWith(".json"))
       .map((name) => path.join(API_BATCH_DIR, name));
 
@@ -910,12 +1738,24 @@ function listVisibleQueuedBatchMetas() {
 
       const progress = readProgress(meta.batchId);
       const domains = domainsForBatch(meta.batchId, null, meta);
-      const progressTotal = parseInt((progress && progress.total) || meta.totalQueued || meta.domainCount || domains.length || "0", 10) || 0;
-      const progressCompleted = parseInt((progress && progress.completed) || "0", 10) || 0;
+      const progressTotal =
+        parseInt(
+          (progress && progress.total) ||
+            meta.totalQueued ||
+            meta.domainCount ||
+            domains.length ||
+            "0",
+          10,
+        ) || 0;
+      const progressCompleted =
+        parseInt((progress && progress.completed) || "0", 10) || 0;
       const resultCount = resultDomainsForBatch(meta.batchId, meta).size;
       const trueCompleted = Math.max(progressCompleted, resultCount);
-      const allDomainsAlreadyProcessed = progressTotal > 0 && trueCompleted >= progressTotal;
-      const trulyFinal = isFinalBatchStatus(status) && (progressTotal <= 0 || trueCompleted >= progressTotal);
+      const allDomainsAlreadyProcessed =
+        progressTotal > 0 && trueCompleted >= progressTotal;
+      const trulyFinal =
+        isFinalBatchStatus(status) &&
+        (progressTotal <= 0 || trueCompleted >= progressTotal);
 
       // If the worker finished and activeJobs was removed but meta/progress is a little late,
       // do not keep showing a stale completed batch in /jobs or the monitors.
@@ -933,7 +1773,7 @@ function listVisibleQueuedBatchMetas() {
         PROCESSING: true,
         SCANNING: true,
         ACTIVE: true,
-        STARTED: true
+        STARTED: true,
       };
       if (!monitorVisibleStatuses[status] && !progress) {
         continue;
@@ -948,14 +1788,19 @@ function listVisibleQueuedBatchMetas() {
   }
 
   out.sort((a, b) => {
-    const at = Date.parse(a.meta.enqueuedAt || a.meta.lastChunkAt || a.meta.createdAt || "") || 0;
-    const bt = Date.parse(b.meta.enqueuedAt || b.meta.lastChunkAt || b.meta.createdAt || "") || 0;
+    const at =
+      Date.parse(
+        a.meta.enqueuedAt || a.meta.lastChunkAt || a.meta.createdAt || "",
+      ) || 0;
+    const bt =
+      Date.parse(
+        b.meta.enqueuedAt || b.meta.lastChunkAt || b.meta.createdAt || "",
+      ) || 0;
     return at - bt;
   });
 
   return out;
 }
-
 
 function clearVisibleQueuedBatchFiles(reason = "startup", options = {}) {
   const includeFinal = !!(options && options.includeFinal);
@@ -968,7 +1813,8 @@ function clearVisibleQueuedBatchFiles(reason = "startup", options = {}) {
       return { ok: true, reason, cleared, skipped, errors };
     }
 
-    const files = fs.readdirSync(API_BATCH_DIR)
+    const files = fs
+      .readdirSync(API_BATCH_DIR)
       .filter((name) => name.endsWith(".json"))
       .map((name) => path.join(API_BATCH_DIR, name));
 
@@ -989,7 +1835,11 @@ function clearVisibleQueuedBatchFiles(reason = "startup", options = {}) {
       const status = String(meta.status || "QUEUED").toUpperCase();
 
       if (activeJobs.has(`multi:${meta.batchId}`)) {
-        skipped.push({ batch_id: meta.batchId, status, reason: "active in current API process" });
+        skipped.push({
+          batch_id: meta.batchId,
+          status,
+          reason: "active in current API process",
+        });
         continue;
       }
 
@@ -997,7 +1847,11 @@ function clearVisibleQueuedBatchFiles(reason = "startup", options = {}) {
       // also clear final DONE/ERROR/FAILED metadata from the monitor queue only.
       // This does not delete the real scan result folders under SCAN_ROOT.
       if (isFinalBatchStatus(status) && !includeFinal) {
-        skipped.push({ batch_id: meta.batchId, status, reason: "final batch metadata kept" });
+        skipped.push({
+          batch_id: meta.batchId,
+          status,
+          reason: "final batch metadata kept",
+        });
         continue;
       }
 
@@ -1018,13 +1872,21 @@ function clearVisibleQueuedBatchFiles(reason = "startup", options = {}) {
             deletedFiles.push(candidate);
           }
         } catch (e) {
-          errors.push({ batch_id: meta.batchId, file: candidate, error: e.message });
+          errors.push({
+            batch_id: meta.batchId,
+            file: candidate,
+            error: e.message,
+          });
         }
       }
 
       activeJobs.delete(`multi:${meta.batchId}`);
       stopBatchTimeWatcher(meta.batchId);
-      cleared.push({ batch_id: meta.batchId, status, deleted_files: deletedFiles });
+      cleared.push({
+        batch_id: meta.batchId,
+        status,
+        deleted_files: deletedFiles,
+      });
     }
   } catch (err) {
     errors.push({ error: err.message });
@@ -1035,11 +1897,15 @@ function clearVisibleQueuedBatchFiles(reason = "startup", options = {}) {
 
 function progressForBatchStatus(meta, progress, domains, running = false) {
   const status = String((meta && meta.status) || "").toUpperCase();
-  const total = domains.length || parseInt((meta && (meta.totalQueued || meta.domainCount)) || "0", 10) || 0;
+  const total =
+    domains.length ||
+    parseInt((meta && (meta.totalQueued || meta.domainCount)) || "0", 10) ||
+    0;
 
   if (progress && progress.status) return progress;
 
-  const serverName = (meta && meta.serverName) ? String(meta.serverName) : "server";
+  const serverName =
+    meta && meta.serverName ? String(meta.serverName) : "server";
 
   if (status === "WAITING_GAP") {
     return {
@@ -1074,7 +1940,9 @@ function progressForBatchStatus(meta, progress, domains, running = false) {
     };
   }
 
-  return progress || { completed: 0, total, status: "queued", current_domain: "" };
+  return (
+    progress || { completed: 0, total, status: "queued", current_domain: "" }
+  );
 }
 
 // ── CSV parser ────────────────────────────────────────────────────────────────
@@ -1216,17 +2084,16 @@ function findBatchCSV(batchRoot) {
   return null;
 }
 
-
 function domainFromResultRow(row = {}) {
   return sanitizeDomain(
     row.Domain ||
-    row.domain ||
-    row.DOMAIN ||
-    row.Domain_Name ||
-    row.domain_name ||
-    row.URL ||
-    row.url ||
-    ""
+      row.domain ||
+      row.DOMAIN ||
+      row.Domain_Name ||
+      row.domain_name ||
+      row.URL ||
+      row.url ||
+      "",
   );
 }
 
@@ -1247,7 +2114,13 @@ function isBatchFinalFromMetaOrProgress(meta = null, progress = null) {
   if (statusText.indexOf("DONE") === 0) return true;
 
   const completed = parseInt((progress && progress.completed) || "0", 10) || 0;
-  const total = parseInt((progress && progress.total) || (meta && (meta.totalQueued || meta.domainCount)) || "0", 10) || 0;
+  const total =
+    parseInt(
+      (progress && progress.total) ||
+        (meta && (meta.totalQueued || meta.domainCount)) ||
+        "0",
+      10,
+    ) || 0;
   return total > 0 && completed >= total;
 }
 
@@ -1271,7 +2144,9 @@ function collectRowsForBatch(batchId, batchRoot, meta = null, progress = null) {
       const rows = parseCSV(fs.readFileSync(batchCsvPath, "utf8"));
       for (const row of rows || []) addRow(row);
     } catch (err) {
-      console.error(`[api] could not parse batch CSV for ${batchId}: ${err.message}`);
+      console.error(
+        `[api] could not parse batch CSV for ${batchId}: ${err.message}`,
+      );
     }
   }
 
@@ -1326,32 +2201,67 @@ function collectRowsForBatch(batchId, batchRoot, meta = null, progress = null) {
   return [...ordered, ...extraRows];
 }
 
-
 function resultDomainsForBatch(batchId, meta = null) {
   const out = new Set();
 
   try {
-    const batchRoot = resolveBatchRootForMultiResult(batchId, meta);
+    const domains = domainsForBatch(batchId, null, meta);
     const progress = readProgress(batchId);
-    const rows = collectRowsForBatch(batchId, batchRoot, meta, progress);
 
-    for (const row of rows || []) {
-      const d = domainFromResultRow(row);
-      if (d) out.add(d);
+    // IMPORTANT RECOVERY FIX:
+    // Some batches store meta.scanBatchPath as the date folder, for example:
+    //   /home/ind/2026-06-21
+    // while the actual per-domain result folders are written to a suffixed root:
+    //   /home/ind/2026-06-21_<runid>_<token>/<domain>/summary.csv
+    // If we trust meta.scanBatchPath too early, recovery can show a finished
+    // domain as stopped and rescan it. Always also inspect each child
+    // latest_path_<batchId>_<domain>.txt file and use those roots as evidence.
+    const candidateRoots = [];
+    function addRoot(root) {
+      const r = String(root || "").trim();
+      if (r && fs.existsSync(r) && !candidateRoots.includes(r)) candidateRoots.push(r);
     }
 
-    // Extra safety: scan per-domain CSV files even if collectRowsForBatch could not
-    // resolve the batch-level CSV yet. This keeps domains-monitor and FileMaker
-    // aligned when index.js writes /<batch>/<domain>/<domain>_results.csv first.
-    const domains = domainsForBatch(batchId, null, meta);
-    if (batchRoot && fs.existsSync(batchRoot)) {
-      for (const domain of domains) {
-        const d = sanitizeDomain(domain);
-        if (!d || out.has(d)) continue;
+    // 1) Child latest paths are the strongest evidence for completed domains.
+    for (const domain of domains) {
+      const d = sanitizeDomain(domain);
+      if (!d) continue;
+      const childJobId = batchChildJobId(batchId, d);
+      try {
+        const childLatest = readFileOrNull(latestPathFile(childJobId));
+        addRoot(batchRootFromLatestPathText(childLatest));
+      } catch (_) {}
+    }
 
+    // 2) Existing resolver is still useful for older batches and batch-level CSVs.
+    const batchRoot = resolveBatchRootForMultiResult(batchId, meta);
+    addRoot(batchRoot);
+
+    // 3) Explicit meta roots are fallback candidates, not the only source of truth.
+    if (meta) {
+      addRoot(meta.scanBatchPath || meta.batchRoot || meta.batchPath);
+    }
+
+    // Read any batch-level rows from every candidate root.
+    for (const root of candidateRoots) {
+      try {
+        const rows = collectRowsForBatch(batchId, root, meta, progress);
+        for (const row of rows || []) {
+          const d = domainFromResultRow(row);
+          if (d) out.add(d);
+        }
+      } catch (_) {}
+    }
+
+    // Read per-domain CSV evidence from every candidate root.
+    for (const domain of domains) {
+      const d = sanitizeDomain(domain);
+      if (!d || out.has(d)) continue;
+
+      for (const root of candidateRoots) {
         const candidates = [
-          path.join(batchRoot, d, "summary.csv"),
-          path.join(batchRoot, d, `${d}_results.csv`),
+          path.join(root, d, "summary.csv"),
+          path.join(root, d, `${d}_results.csv`),
         ];
 
         for (const candidate of candidates) {
@@ -1361,15 +2271,29 @@ function resultDomainsForBatch(batchId, meta = null) {
             break;
           }
         }
+        if (out.has(d)) break;
       }
     }
+
+    // Final safety: a per-domain done flag is written after the domain audit
+    // completes. This prevents recovery from rerunning domains whose result path
+    // is present but could not be parsed because of path/root drift.
+    for (const domain of domains) {
+      const d = sanitizeDomain(domain);
+      if (!d || out.has(d)) continue;
+      const childJobId = batchChildJobId(batchId, d);
+      try {
+        if (fs.existsSync(doneFlagPath(childJobId))) out.add(d);
+      } catch (_) {}
+    }
   } catch (err) {
-    console.error(`[api] resultDomainsForBatch failed batch_id=${batchId}: ${err.message}`);
+    console.error(
+      `[api] resultDomainsForBatch failed batch_id=${batchId}: ${err.message}`,
+    );
   }
 
   return out;
 }
-
 
 // ── Cleanup helpers ───────────────────────────────────────────────────────────
 
@@ -1415,7 +2339,8 @@ function cleanupOldApiHelperFiles(hours = 24) {
         /^progress_.+\.txt$/.test(entry) ||
         /^progress_.+\.log$/.test(entry) ||
         /^done_.+\.flag$/.test(entry) ||
-        /^latest_path_.+\.txt$/.test(entry);
+        /^latest_path_.+\.txt$/.test(entry) ||
+        /^wp_.+\.json$/.test(entry);
 
       if (!isApiHelperFile) {
         skipped.push({ file: entry, reason: "not an API helper file" });
@@ -1497,7 +2422,10 @@ function purgeStaleJobs(maxAgeMs) {
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
-    const maxBytes = parseInt(process.env.MAX_REQUEST_BODY_BYTES || String(50 * 1024 * 1024), 10);
+    const maxBytes = parseInt(
+      process.env.MAX_REQUEST_BODY_BYTES || String(50 * 1024 * 1024),
+      10,
+    );
     const chunks = [];
     let received = 0;
     let tooLarge = false;
@@ -1514,7 +2442,11 @@ function readJsonBody(req) {
 
     req.on("end", () => {
       if (tooLarge) {
-        return reject(new Error(`Request body too large. Limit=${maxBytes} bytes, received=${received} bytes`));
+        return reject(
+          new Error(
+            `Request body too large. Limit=${maxBytes} bytes, received=${received} bytes`,
+          ),
+        );
       }
 
       const body = Buffer.concat(chunks).toString("utf8").trim();
@@ -1601,7 +2533,7 @@ async function handleRequest(req, res) {
     const maxConcurrent = parseInt(ss.max_concurrent, 10) || 0;
     const minutesGap = parseFloat(ss.minutes_gap) || 0;
     const domainsPerHour = parseInt(ss.domains_per_hour, 10) || 0; // display only
-    const domainsPerDay = parseInt(ss.domains_per_day, 10) || 0;   // display only
+    const domainsPerDay = parseInt(ss.domains_per_day, 10) || 0; // display only
 
     const usage = getUsage();
     const activeSlots = currentReservedDomainCount();
@@ -1630,13 +2562,18 @@ async function handleRequest(req, res) {
       return blocked("Scanning is currently disabled on this server.");
     }
 
-    const minsRemaining = minutesUntilNextAllowed(minutesGap, usage.last_scan_at);
+    const minsRemaining = minutesUntilNextAllowed(
+      minutesGap,
+      usage.last_scan_at,
+    );
     if (minsRemaining > 0) {
-      const nextAvailableSlot = new Date(Date.now() + (minsRemaining * 60000)).toISOString();
+      const nextAvailableSlot = new Date(
+        Date.now() + minsRemaining * 60000,
+      ).toISOString();
 
       return blocked(
         `Please wait ${minsRemaining} more minute(s) before starting another scan. ` +
-        `Minimum gap between scans: ${minutesGap} minute(s).`,
+          `Minimum gap between scans: ${minutesGap} minute(s).`,
         {
           allowed_count: 0,
           minutes_remaining: minsRemaining,
@@ -1644,33 +2581,36 @@ async function handleRequest(req, res) {
           next_available_slot: nextAvailableSlot,
           minutes_gap: minutesGap,
           max_concurrent: maxConcurrent,
-        }
+        },
       );
     }
 
-    const allowedByConcurrent = maxConcurrent > 0
-      ? Math.max(0, maxConcurrent - activeSlots)
-      : domainCount;
+    const allowedByConcurrent =
+      maxConcurrent > 0
+        ? Math.max(0, maxConcurrent - activeSlots)
+        : domainCount;
 
     const allowedCount = Math.min(domainCount, allowedByConcurrent);
 
     if (allowedCount === 0) {
       return blocked(
         `Max concurrent scans reached (${activeSlots} active, limit is ${maxConcurrent}). ` +
-        `Please wait for running scans to finish.`,
+          `Please wait for running scans to finish.`,
         {
           allowed_count: 0,
           max_concurrent: maxConcurrent,
           minutes_gap: minutesGap,
-        }
+        },
       );
     }
 
     console.log(
       `[scan-capacity] OK — mode=${mode} requested=${domainCount} allowed=${allowedCount}` +
-      (maxConcurrent > 0 ? ` concurrent=${activeSlots}/${maxConcurrent}` : "") +
-      ` gap=${minutesGap}m display_hour=${usage.hour_count}/${domainsPerHour || "display"}` +
-      ` display_day=${usage.day_count}/${domainsPerDay || "display"}`
+        (maxConcurrent > 0
+          ? ` concurrent=${activeSlots}/${maxConcurrent}`
+          : "") +
+        ` gap=${minutesGap}m display_hour=${usage.hour_count}/${domainsPerHour || "display"}` +
+        ` display_day=${usage.day_count}/${domainsPerDay || "display"}`,
     );
 
     return jsonResponse(res, 200, {
@@ -1705,24 +2645,27 @@ async function handleRequest(req, res) {
       return jsonResponse(res, 400, { ok: false, error: e.message });
     }
 
-    
     // Keep FileMaker's normalized root domain for records, but allow an exact URL
     // target for sites where path/query matters, such as popup/age-gate pages.
-    const rawTarget = String(parsed.target_url || parsed.url || parsed.domain || '').trim();
+    const rawTarget = String(
+      parsed.target_url || parsed.url || parsed.domain || "",
+    ).trim();
     const domain = sanitizeDomain(parsed.domain || rawTarget);
     const forceRescan = !!parsed.force_rescan;
     const selectedTools = normalizeSelectedTools(parsed.tools);
-    const enabledTools = selectedTools.length ? selectedTools : ALL_TOOL_KEYS;
+    const enabledTools = selectedTools.length ? selectedTools : DEFAULT_TOOL_KEYS;
     const scanSettings = parsed.scan_settings || {};
     const minutesGap = parseFloat(scanSettings.minutes_gap || 0) || 0;
     const maxConcurrentSetting =
-      parseInt(scanSettings.max_concurrent || process.env.MAX_CONCURRENT || "3", 10) || 3;
+      parseInt(
+        scanSettings.max_concurrent || process.env.MAX_CONCURRENT || "3",
+        10,
+      ) || 3;
 
     const domainLaunchDelayMs =
       minutesGap > 0 ? Math.round(minutesGap * 60 * 1000) : 3000;
 
-    const effectiveMaxConcurrent =
-      minutesGap > 0 ? 1 : maxConcurrentSetting;
+    const effectiveMaxConcurrent = minutesGap > 0 ? 1 : maxConcurrentSetting;
 
     if (!domain) {
       return jsonResponse(res, 400, { ok: false, error: "Missing domain" });
@@ -1737,7 +2680,9 @@ async function handleRequest(req, res) {
       if (fs.existsSync(donePath)) {
         const singleKey = `single:${domain}`;
         if (activeJobs.has(singleKey)) {
-          console.log(`[api] Clearing stale active job for ${domain} because done flag exists (${busy.jobId})`);
+          console.log(
+            `[api] Clearing stale active job for ${domain} because done flag exists (${busy.jobId})`,
+          );
           activeJobs.delete(singleKey);
         }
         busy = findActiveJobForDomain(domain);
@@ -1778,12 +2723,12 @@ async function handleRequest(req, res) {
       const staleJob = activeJobs.get(jobKey);
       activeJobs.delete(jobKey);
       console.log(
-        `[api] force_rescan cleared in-memory reservation for ${domain} (old job_id=${staleJob.jobId})`
+        `[api] force_rescan cleared in-memory reservation for ${domain} (old job_id=${staleJob.jobId})`,
       );
     }
 
     console.log(
-      `[api] Starting single scan for ${domain} with job_id=${jobId}${forceRescan ? " (force_rescan)" : ""}`
+      `[api] Starting single scan for ${domain} with job_id=${jobId}${forceRescan ? " (force_rescan)" : ""}`,
     );
 
     // Always clear any stale lock file before spawning the child
@@ -1808,15 +2753,18 @@ async function handleRequest(req, res) {
         MINUTES_GAP: String(minutesGap),
         DOMAIN_LAUNCH_DELAY_MS: String(domainLaunchDelayMs),
         MAX_CONCURRENT: String(effectiveMaxConcurrent),
-        
       },
       detached: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
     const logFile = logFilePath(jobId);
-    child.stdout.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
-    child.stderr.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+    child.stdout.on("data", (chunk) =>
+      appendTextSafe(logFile, chunk.toString()),
+    );
+    child.stderr.on("data", (chunk) =>
+      appendTextSafe(logFile, chunk.toString()),
+    );
 
     activeJobs.set(jobKey, {
       key: jobKey,
@@ -1831,11 +2779,13 @@ async function handleRequest(req, res) {
     });
 
     child.on("exit", (code, signal) => {
-      console.log(`[api] Single scan exited for ${domain}. code=${code} signal=${signal}`);
+      console.log(
+        `[api] Single scan exited for ${domain}. code=${code} signal=${signal}`,
+      );
 
       writeTextSafe(
         doneFlagPath(jobId),
-        `done\ncode=${code}\nsignal=${signal}\nfinishedAt=${nowIso()}\ndomain=${domain}`
+        `done\ncode=${code}\nsignal=${signal}\nfinishedAt=${nowIso()}\ndomain=${domain}`,
       );
 
       releaseDomainLock(domain, child.pid);
@@ -1843,7 +2793,10 @@ async function handleRequest(req, res) {
       if (code !== 0 || signal) {
         appendFailedScanLog({
           domain,
-          reason: inferFailureReasonFromLog(logFile, `Single scan failed. code=${code} signal=${signal || ""}`),
+          reason: inferFailureReasonFromLog(
+            logFile,
+            `Single scan failed. code=${code} signal=${signal || ""}`,
+          ),
           source: "single",
           jobId,
         });
@@ -1884,21 +2837,26 @@ async function handleRequest(req, res) {
     const rawDomainTargets = domainTargets.map((item) => item.raw);
     const forceRescan = !!parsed.force_rescan;
     const selectedTools = normalizeSelectedTools(parsed.tools);
-    const enabledTools = selectedTools.length ? selectedTools : ALL_TOOL_KEYS;
-    
+    const enabledTools = selectedTools.length ? selectedTools : DEFAULT_TOOL_KEYS;
+
     const scanSettings = parsed.scan_settings || {};
     const minutesGap = parseFloat(scanSettings.minutes_gap || 0) || 0;
     const maxConcurrentSetting =
-      parseInt(scanSettings.max_concurrent || process.env.MAX_CONCURRENT || "3", 10) || 3;
+      parseInt(
+        scanSettings.max_concurrent || process.env.MAX_CONCURRENT || "3",
+        10,
+      ) || 3;
 
     const domainLaunchDelayMs =
       minutesGap > 0 ? Math.round(minutesGap * 60 * 1000) : 3000;
 
-    const effectiveMaxConcurrent =
-      minutesGap > 0 ? 1 : maxConcurrentSetting;
+    const effectiveMaxConcurrent = minutesGap > 0 ? 1 : maxConcurrentSetting;
 
     if (!domains.length) {
-      return jsonResponse(res, 400, { ok: false, error: "No domains provided" });
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "No domains provided",
+      });
     }
 
     const batchId = createBatchId();
@@ -1909,12 +2867,14 @@ async function handleRequest(req, res) {
     // With MINUTES_GAP the worker runs one domain at a time so memory stays flat
     // regardless of how many domains are queued in the .txt file.
     if (domains.length > 10000) {
-      console.warn(`[multi-scan] Large batch: ${domains.length} domains. Make sure MINUTES_GAP is set.`);
+      console.warn(
+        `[multi-scan] Large batch: ${domains.length} domains. Make sure MINUTES_GAP is set.`,
+      );
     }
 
     const lockCheck = acquireBatchDomainLocks(
       domains.map((d) => ({ domain: d, forceRescan })),
-      process.pid
+      process.pid,
     );
 
     if (lockCheck.conflicts.length) {
@@ -1962,10 +2922,14 @@ async function handleRequest(req, res) {
         saveBatchMeta(meta);
         initJobProgressFile(batchId, "", domains.length);
       } catch (err) {
-        console.error(`[api] /multi-scan meta init failed batch_id=${batchId}: ${err.message}`);
+        console.error(
+          `[api] /multi-scan meta init failed batch_id=${batchId}: ${err.message}`,
+        );
       }
 
-      console.log(`[api] Starting multi-scan batch_id=${batchId} domains=${domains.length}`);
+      console.log(
+        `[api] Starting multi-scan batch_id=${batchId} domains=${domains.length}`,
+      );
 
       // For large batches, do not pass every domain as a CLI argument.
       // Save the domain list to a text file and pass only the filename to multi-audit.js.
@@ -1974,12 +2938,20 @@ async function handleRequest(req, res) {
       const domainListFilePath = path.join(TOOL_DIR, domainListFileName);
 
       try {
-        fs.writeFileSync(domainListFilePath, rawDomainTargets.join("\n") + "\n", "utf8");
+        fs.writeFileSync(
+          domainListFilePath,
+          rawDomainTargets.join("\n") + "\n",
+          "utf8",
+        );
         meta.domainListFile = domainListFilePath;
         saveBatchMeta(meta);
-        console.log(`[api] Wrote multi-scan domain list: ${domainListFilePath}`);
+        console.log(
+          `[api] Wrote multi-scan domain list: ${domainListFilePath}`,
+        );
       } catch (writeErr) {
-        console.error(`[api] failed to write domain list batch_id=${batchId}: ${writeErr.message}`);
+        console.error(
+          `[api] failed to write domain list batch_id=${batchId}: ${writeErr.message}`,
+        );
         try {
           meta.status = "ERROR";
           meta.error = `Failed to write domain list file: ${writeErr.message}`;
@@ -1987,7 +2959,7 @@ async function handleRequest(req, res) {
           saveBatchMeta(meta);
           writeTextSafe(
             doneFlagPath(batchId),
-            `done\ncode=-1\nsignal=domain_list_write_error\nfinishedAt=${nowIso()}\nerror=${writeErr.message}`
+            `done\ncode=-1\nsignal=domain_list_write_error\nfinishedAt=${nowIso()}\nerror=${writeErr.message}`,
           );
         } catch (_) {}
         return;
@@ -2013,7 +2985,9 @@ async function handleRequest(req, res) {
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (spawnErr) {
-        console.error(`[api] spawn failed batch_id=${batchId}: ${spawnErr.message}`);
+        console.error(
+          `[api] spawn failed batch_id=${batchId}: ${spawnErr.message}`,
+        );
         try {
           meta.status = "ERROR";
           meta.error = spawnErr.message;
@@ -2021,7 +2995,7 @@ async function handleRequest(req, res) {
           saveBatchMeta(meta);
           writeTextSafe(
             doneFlagPath(batchId),
-            `done\ncode=-1\nsignal=spawn_exception\nfinishedAt=${nowIso()}\nerror=${spawnErr.message}`
+            `done\ncode=-1\nsignal=spawn_exception\nfinishedAt=${nowIso()}\nerror=${spawnErr.message}`,
           );
         } catch (_) {}
         return;
@@ -2029,24 +3003,34 @@ async function handleRequest(req, res) {
 
       meta.childPid = child.pid;
       meta.status = "RUNNING";
-      try { saveBatchMeta(meta); } catch (_) {}
+      try {
+        saveBatchMeta(meta);
+      } catch (_) {}
 
       const logFile = logFilePath(batchId);
-      child.stdout.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
-      child.stderr.on("data", (chunk) => appendTextSafe(logFile, chunk.toString()));
+      child.stdout.on("data", (chunk) =>
+        appendTextSafe(logFile, chunk.toString()),
+      );
+      child.stderr.on("data", (chunk) =>
+        appendTextSafe(logFile, chunk.toString()),
+      );
 
       child.on("error", (err) => {
-        console.error(`[api] Multi-scan spawn error batch_id=${batchId}: ${err.message}`);
+        console.error(
+          `[api] Multi-scan spawn error batch_id=${batchId}: ${err.message}`,
+        );
 
         const saved = getBatchMeta(batchId) || meta;
         saved.status = "ERROR";
         saved.error = err.message;
         saved.finishedAt = nowIso();
-        try { saveBatchMeta(saved); } catch (_) {}
+        try {
+          saveBatchMeta(saved);
+        } catch (_) {}
 
         writeTextSafe(
           doneFlagPath(batchId),
-          `done\ncode=-1\nsignal=spawn_error\nfinishedAt=${nowIso()}\nerror=${err.message}`
+          `done\ncode=-1\nsignal=spawn_error\nfinishedAt=${nowIso()}\nerror=${err.message}`,
         );
 
         activeJobs.delete(batchKey);
@@ -2070,7 +3054,9 @@ async function handleRequest(req, res) {
       startBatchTimeWatcher(batchId);
 
       child.on("exit", (code, signal) => {
-        console.log(`[api] Multi-scan exited batch_id=${batchId}. code=${code} signal=${signal}`);
+        console.log(
+          `[api] Multi-scan exited batch_id=${batchId}. code=${code} signal=${signal}`,
+        );
         const jobBeforeDelete = activeJobs.get(batchKey) || null;
         activeJobs.delete(batchKey);
 
@@ -2079,12 +3065,23 @@ async function handleRequest(req, res) {
         saved.exitCode = code;
         saved.signal = signal;
         saved.finishedAt = nowIso();
-        try { saveBatchMeta(saved); } catch (_) {}
+        try {
+          saveBatchMeta(saved);
+        } catch (_) {}
 
         if (code !== 0 || signal) {
-          const reason = inferFailureReasonFromLog(logFile, `Multi scan failed. code=${code} signal=${signal || ""}`);
+          const reason = inferFailureReasonFromLog(
+            logFile,
+            `Multi scan failed. code=${code} signal=${signal || ""}`,
+          );
           for (const d of domains || []) {
-            appendFailedScanLog({ domain: d, reason, source: "multi", batchId, jobId: batchId });
+            appendFailedScanLog({
+              domain: d,
+              reason,
+              source: "multi",
+              batchId,
+              jobId: batchId,
+            });
           }
         }
 
@@ -2097,7 +3094,9 @@ async function handleRequest(req, res) {
         }
       });
 
-      try { recordScan(domains.length); } catch (_) {}
+      try {
+        recordScan(domains.length);
+      } catch (_) {}
     });
 
     return; // response already sent above
@@ -2133,6 +3132,52 @@ async function handleRequest(req, res) {
     });
   }
 
+  // ── GET /wp-status ─────────────────────────────────────────────────────────
+
+  if (method === "GET" && url.pathname === "/wp-status") {
+    const jobId = (url.searchParams.get("job_id") || "").trim();
+    const domain = sanitizeDomain(url.searchParams.get("domain") || "");
+
+    const candidates = [];
+    if (jobId) candidates.push(wpStatusFileByJobId(jobId));
+    if (domain) candidates.push(wpStatusFileByDomain(domain));
+
+    const file = candidates.find((candidate) => {
+      try {
+        return candidate && fs.existsSync(candidate);
+      } catch (_) {
+        return false;
+      }
+    });
+
+    if (!file) {
+      return jsonResponse(res, 200, {
+        ok: false,
+        ready: false,
+        reason: "not_ready_yet",
+        job_id: jobId || null,
+        domain: domain || null,
+      });
+    }
+
+    try {
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      return jsonResponse(res, 200, {
+        ok: true,
+        ready: true,
+        file: path.basename(file),
+        data,
+      });
+    } catch (e) {
+      return jsonResponse(res, 200, {
+        ok: false,
+        ready: false,
+        reason: e.message,
+        file: path.basename(file),
+      });
+    }
+  }
+
   // ── GET /multi-progress ────────────────────────────────────────────────────
 
   if (method === "GET" && url.pathname === "/multi-progress") {
@@ -2152,13 +3197,24 @@ async function handleRequest(req, res) {
     const job = activeJobs.get(key) || null;
     const running = !!job;
     const domains = domainsForBatch(batchId, job, meta);
-    const effectiveProgress = progressForBatchStatus(meta, progress, domains, running);
+    const effectiveProgress = progressForBatchStatus(
+      meta,
+      progress,
+      domains,
+      running,
+    );
     const resultSet = resultDomainsForBatch(batchId, meta);
     const domainStatuses = withDomainProcessTimes(
       batchId,
-      buildDomainStatusList(domains, effectiveProgress, running, meta, resultSet),
+      buildDomainStatusList(
+        domains,
+        effectiveProgress,
+        running,
+        meta,
+        resultSet,
+      ),
       running,
-      meta
+      meta,
     );
     const completedDomains = domainStatuses
       .filter((item) => item.status === "done")
@@ -2176,8 +3232,11 @@ async function handleRequest(req, res) {
       domain_statuses: domainStatuses,
       completed_domains: completedDomains,
       failed_domains: failedDomains,
-      queued_count: domainStatuses.filter((item) => item.status === "queued").length,
-      processing_count: domainStatuses.filter((item) => item.status === "processing").length,
+      queued_count: domainStatuses.filter((item) => item.status === "queued")
+        .length,
+      processing_count: domainStatuses.filter(
+        (item) => item.status === "processing",
+      ).length,
       done_count: completedDomains.length,
       failed_count: failedDomains.length,
     });
@@ -2221,12 +3280,19 @@ async function handleRequest(req, res) {
       });
     }
 
-    const found = jobId ? findSingleResultByJobId(jobId) : findSingleResult(resolvedDomain);
+    const found = jobId
+      ? findSingleResultByJobId(jobId)
+      : findSingleResult(resolvedDomain);
     if (!found) {
       // If a single scan has already exited and no result row was written,
       // return fallback N/A so FileMaker can still create a Test_Results row.
       const doneText = jobId ? readFileOrNull(doneFlagPath(jobId)) : "";
-      const stillRunning = !!(jobId && Array.from(activeJobs.values()).some((j) => j.type === "single" && j.jobId === jobId));
+      const stillRunning = !!(
+        jobId &&
+        Array.from(activeJobs.values()).some(
+          (j) => j.type === "single" && j.jobId === jobId,
+        )
+      );
 
       if (jobId && doneText && !stillRunning) {
         return jsonResponse(res, 404, {
@@ -2259,7 +3325,9 @@ async function handleRequest(req, res) {
 
   if (method === "GET" && url.pathname === "/multi-result") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
-    const requestedDomain = sanitizeDomain(url.searchParams.get("domain") || "");
+    const requestedDomain = sanitizeDomain(
+      url.searchParams.get("domain") || "",
+    );
 
     if (!batchId) {
       return jsonResponse(res, 400, { ok: false, error: "Missing batch_id" });
@@ -2285,17 +3353,26 @@ async function handleRequest(req, res) {
         const job = activeJobs.get(`multi:${batchId}`) || null;
         const domains = domainsForBatch(batchId, job, meta);
         const resultSet = resultDomainsForBatch(batchId, meta);
-        const effectiveProgress = progressForBatchStatus(meta, progress, domains, !!job);
+        const effectiveProgress = progressForBatchStatus(
+          meta,
+          progress,
+          domains,
+          !!job,
+        );
         const statusList = buildDomainStatusList(
           domains,
           effectiveProgress,
           !!job,
           meta,
-          resultSet
+          resultSet,
         );
 
-        const statusRow = statusList.find((item) => item.domain === requestedDomain);
-        const status = String((statusRow && statusRow.status) || "").toLowerCase();
+        const statusRow = statusList.find(
+          (item) => item.domain === requestedDomain,
+        );
+        const status = String(
+          (statusRow && statusRow.status) || "",
+        ).toLowerCase();
 
         // FileMaker scope:
         // - Precheck unreachable must not stop scanning; index.js continues all tools.
@@ -2309,7 +3386,10 @@ async function handleRequest(req, res) {
           status.indexOf("dead") >= 0 ||
           status.indexOf("unreachable") >= 0;
 
-        if (isTerminalFailedDomain || isBatchFinalFromMetaOrProgress(meta, progress)) {
+        if (
+          isTerminalFailedDomain ||
+          isBatchFinalFromMetaOrProgress(meta, progress)
+        ) {
           return jsonResponse(res, 404, {
             ok: false,
             retry: true,
@@ -2382,7 +3462,10 @@ async function handleRequest(req, res) {
     }
 
     if (!job) {
-      return jsonResponse(res, 404, { ok: false, error: "Single job not found" });
+      return jsonResponse(res, 404, {
+        ok: false,
+        error: "Single job not found",
+      });
     }
 
     const killed = killProcess(job.pid);
@@ -2415,7 +3498,10 @@ async function handleRequest(req, res) {
 
     const key = `multi:${batchId}`;
     if (!activeJobs.has(key)) {
-      return jsonResponse(res, 404, { ok: false, error: "Batch job not found" });
+      return jsonResponse(res, 404, {
+        ok: false,
+        error: "Batch job not found",
+      });
     }
 
     const job = activeJobs.get(key);
@@ -2490,7 +3576,12 @@ async function handleRequest(req, res) {
     const progress = readProgress(batchId);
     const domains = domainsForBatch(batchId, job, meta);
     const resultSet = resultDomainsForBatch(batchId, meta);
-    const domainStatuses = withDomainProcessTimes(batchId, buildDomainStatusList(domains, progress, !!job, meta, resultSet), !!job, meta);
+    const domainStatuses = withDomainProcessTimes(
+      batchId,
+      buildDomainStatusList(domains, progress, !!job, meta, resultSet),
+      !!job,
+      meta,
+    );
 
     return jsonResponse(res, 200, {
       ok: true,
@@ -2568,67 +3659,978 @@ async function handleRequest(req, res) {
 
   if (method === "GET" && url.pathname === "/tester") {
     try {
-      const html = fs.readFileSync(path.join(TOOL_DIR, "api-tester.html"), "utf8");
+      const html = fs.readFileSync(
+        path.join(TOOL_DIR, "api-tester.html"),
+        "utf8",
+      );
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
       });
       return res.end(html);
     } catch (e) {
-      return jsonResponse(res, 500, { ok: false, error: "Could not load api-tester.html: " + e.message });
+      return jsonResponse(res, 500, {
+        ok: false,
+        error: "Could not load api-tester.html: " + e.message,
+      });
     }
   }
 
   if (method === "GET" && url.pathname === "/tester-multi") {
     try {
-      const html = fs.readFileSync(path.join(TOOL_DIR, "api-tester-multi.html"), "utf8");
+      const html = fs.readFileSync(
+        path.join(TOOL_DIR, "api-tester-multi.html"),
+        "utf8",
+      );
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
       });
       return res.end(html);
     } catch (e) {
-      return jsonResponse(res, 500, { ok: false, error: "Could not load api-tester-multi.html: " + e.message });
+      return jsonResponse(res, 500, {
+        ok: false,
+        error: "Could not load api-tester-multi.html: " + e.message,
+      });
     }
   }
 
   if (method === "GET" && url.pathname === "/jobs-monitor") {
     try {
-      const html = fs.readFileSync(path.join(TOOL_DIR, "jobs-monitor.html"), "utf8");
+      const html = fs.readFileSync(
+        path.join(TOOL_DIR, "jobs-monitor.html"),
+        "utf8",
+      );
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
       });
       return res.end(html);
     } catch (e) {
-      return jsonResponse(res, 500, { ok: false, error: "Could not load jobs-monitor.html: " + e.message });
+      return jsonResponse(res, 500, {
+        ok: false,
+        error: "Could not load jobs-monitor.html: " + e.message,
+      });
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/domains-monitor") {
+    try {
+      const html = fs.readFileSync(
+        path.join(TOOL_DIR, "domains-monitor.html"),
+        "utf8",
+      );
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      });
+      return res.end(html);
+    } catch (e) {
+      return jsonResponse(res, 500, {
+        ok: false,
+        error: "Could not load domains-monitor.html: " + e.message,
+      });
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/server-jobs-summary") {
+    try {
+      const html = fs.readFileSync(
+        path.join(TOOL_DIR, "server-jobs-summary.html"),
+        "utf8",
+      );
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      });
+      return res.end(html);
+    } catch (e) {
+      return jsonResponse(res, 500, {
+        ok: false,
+        error: "Could not load server-jobs-summary.html: " + e.message,
+      });
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/recovery-monitor") {
+    try {
+      const html = fs.readFileSync(
+        path.join(TOOL_DIR, "recovery-monitor.html"),
+        "utf8",
+      );
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      });
+      return res.end(html);
+    } catch (e) {
+      return jsonResponse(res, 500, {
+        ok: false,
+        error: "Could not load recovery-monitor.html: " + e.message,
+      });
+    }
+
+  }
+
+  // ── Legacy recovery compatibility routes ───────────────────────────────────
+  // These use ./utils/recovery.js and keep the Recovery Monitor UI simple:
+  //   GET  /recovery       -> list interrupted/stopped/orphan jobs on this VM
+  //   GET  /recovery-all   -> V1 proxy that asks every VM for /recovery
+  //   POST /resume-batch   -> resume the same job_id/batch_id
+  //   POST /mark-stopped   -> hide/stop the interrupted job
+
+  function legacyRecoveryAvailable() {
+    return legacyRecovery &&
+      typeof legacyRecovery.findInterruptedJobs === "function" &&
+      typeof legacyRecovery.markJobStopped === "function" &&
+      typeof legacyRecovery.buildResumeEnv === "function";
+  }
+
+  function legacyJobIdFrom(job) {
+    return String(
+      (job && (job.jobId || job.job_id || job.batchId || job.batch_id || job.domain)) || "",
+    ).trim();
+  }
+
+  function normalizeLegacyRecoveryJob(job) {
+    job = job || {};
+    const jobId = legacyJobIdFrom(job);
+    const batchId = String(job.batchId || job.batch_id || jobId || "").trim();
+    const typeRaw = String(job.type || "").toLowerCase();
+    const type = typeRaw === "single" ? "single" : "multi";
+
+    const allDomains = uniqueDomains(
+      []
+        .concat(Array.isArray(job.domainList) ? job.domainList : [])
+        .concat(Array.isArray(job.domain_list) ? job.domain_list : [])
+        .concat(Array.isArray(job.domains) ? job.domains : [])
+        .concat(Array.isArray(job.pendingDomains) ? job.pendingDomains : [])
+        .concat(job.lastDomain ? [job.lastDomain] : [])
+        .concat(job.domain ? [job.domain] : []),
+    );
+
+    const doneSet = new Set(uniqueDomains(
+      []
+        .concat(Array.isArray(job.checkpointDomains) ? job.checkpointDomains : [])
+        .concat(Array.isArray(job.doneDomains) ? job.doneDomains : [])
+        .concat(Array.isArray(job.completedDomains) ? job.completedDomains : []),
+    ));
+    const failedSet = new Set(uniqueDomains(
+      []
+        .concat(Array.isArray(job.failedDomains) ? job.failedDomains : [])
+        .concat(Array.isArray(job.failed_domains) ? job.failed_domains : []),
+    ));
+    const pendingSet = new Set(uniqueDomains(
+      []
+        .concat(Array.isArray(job.pendingDomains) ? job.pendingDomains : [])
+        .concat(Array.isArray(job.pending_domains) ? job.pending_domains : []),
+    ));
+    const lastDomain = sanitizeDomain(job.lastDomain || job.last_domain || job.domain || "");
+
+    const domainStatuses = allDomains.map((d) => {
+      const domain = sanitizeDomain(d);
+      let status = "queued";
+      if (doneSet.has(domain)) status = "done";
+      else if (failedSet.has(domain)) status = "failed";
+      else if (lastDomain && domain === lastDomain && pendingSet.has(domain)) status = "stopped";
+      else if (lastDomain && domain === lastDomain && !doneSet.has(domain) && !failedSet.has(domain)) status = "stopped";
+      return { domain, status };
+    });
+
+    let completed = parseInt(job.completed || job.completedCount || job.checkpointCount || doneSet.size || "0", 10) || 0;
+    const failed = failedSet.size || (parseInt(job.failed || job.failedCount || "0", 10) || 0);
+    let total = parseInt(job.total || job.domainCount || job.domain_count || "0", 10) || allDomains.length;
+    if (total < completed) total = completed;
+    if (total <= 0) total = completed + (parseInt(job.pendingCount || job.pending_count || "0", 10) || pendingSet.size);
+
+    let remaining = parseInt(job.pendingCount || job.pending_count || "", 10);
+    if (!Number.isFinite(remaining) || isNaN(remaining)) remaining = Math.max(0, total - completed);
+    if (remaining < 0) remaining = 0;
+
+    const stopped = domainStatuses.filter((r) => r.status === "stopped").length;
+    const queued = Math.max(0, remaining - stopped);
+    const percent = total > 0 ? Math.round((completed / total) * 1000) / 10 : 0;
+
+    return {
+      type,
+      job_id: jobId,
+      batch_id: batchId || jobId,
+      domain: type === "single" ? (lastDomain || allDomains[0] || "") : "",
+      status: String(job.status || "interrupted").toLowerCase().replace(/orphaned_running/g, "interrupted"),
+      raw_status: job.status || "",
+      server_name: job.serverName || job.server_name || "",
+      started_at: job.startedAt || job.started_at || null,
+      updated_at: job.lastModified || job.updated_at || job.interruptedAt || null,
+      interrupted_at: job.interruptedAt || job.interrupted_at || null,
+      current_domain: lastDomain || null,
+      trigger: job.trigger || job.previous_status || "API_OR_SERVER_RESTART",
+      total,
+      completed,
+      failed,
+      stopped,
+      queued,
+      remaining,
+      percent,
+      domain_statuses: domainStatuses,
+      sample_domains: domainStatuses.slice(0, 20),
+      can_resume: job.canResume !== false && !!jobId,
+      checkpoint_count: parseInt(job.checkpointCount || "0", 10) || doneSet.size,
+      pending_count: remaining,
+      domain_list_file: job.domainListFile || null,
+      source: "legacy_recovery_js",
+    };
+  }
+
+  if (method === "GET" && url.pathname === "/recovery") {
+    try {
+      if (!legacyRecoveryAvailable()) {
+        return jsonResponse(res, 500, {
+          ok: false,
+          error: "Legacy recovery module is not available. Install utils/recovery.js and restart PM2.",
+        });
+      }
+      const rawJobs = legacyRecovery.findInterruptedJobs() || [];
+      const jobs = rawJobs.map(normalizeLegacyRecoveryJob);
+      return jsonResponse(res, 200, {
+        ok: true,
+        count: jobs.length,
+        jobs,
+        raw_count: rawJobs.length,
+        server_time: nowIso(),
+      });
+    } catch (e) {
+      return jsonError(res, 500, `Recovery scan failed: ${e.message}`);
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/recovery-all") {
+    const httpModule = require("http");
+    const httpsModule = require("https");
+
+    function decodeRepeatedLegacy(value) {
+      let out = String(value || "").trim();
+      for (let i = 0; i < 5; i++) {
+        const before = out;
+        try { out = decodeURIComponent(out.replace(/\+/g, " ")).trim(); }
+        catch (_) { break; }
+        if (out === before) break;
+      }
+      return out;
+    }
+
+    function parseLegacyServers(raw) {
+      raw = decodeRepeatedLegacy(raw || "");
+      if (!raw) {
+        return [{ name: "This Server", base: `http://127.0.0.1:${PORT}` }];
+      }
+      return raw.split(",").map((part) => {
+        const decoded = decodeRepeatedLegacy(part);
+        const bits = decoded.split("|");
+        let name = decodeRepeatedLegacy(bits[0] || decoded).trim();
+        let base = decodeRepeatedLegacy(bits[1] || bits[0] || "").trim();
+        if (base.endsWith("/")) base = base.slice(0, -1);
+        return base ? { name: name || base, base } : null;
+      }).filter(Boolean);
+    }
+
+    function fetchJsonLegacy(targetUrl, timeoutMs) {
+      return new Promise((resolve) => {
+        const started = Date.now();
+        try {
+          const parsed = new URL(String(targetUrl));
+          const lib = parsed.protocol === "https:" ? httpsModule : httpModule;
+          const req2 = lib.get(parsed, { timeout: timeoutMs || 12000 }, (r2) => {
+            let body = "";
+            r2.setEncoding("utf8");
+            r2.on("data", (chunk) => { body += chunk; if (body.length > 5_000_000) req2.destroy(new Error("Response too large")); });
+            r2.on("end", () => {
+              const ms = Date.now() - started;
+              if (r2.statusCode < 200 || r2.statusCode >= 300) {
+                return resolve({ ok: false, ms, error: `HTTP ${r2.statusCode}: ${body.slice(0, 200)}` });
+              }
+              try { resolve({ ok: true, ms, data: JSON.parse(body) }); }
+              catch (_) { resolve({ ok: false, ms, error: `Invalid JSON: ${body.slice(0, 200)}` }); }
+            });
+          });
+          req2.setTimeout(timeoutMs || 12000, () => req2.destroy(new Error("Timeout")));
+          req2.on("error", (e) => resolve({ ok: false, ms: Date.now() - started, error: e.message }));
+        } catch (e) {
+          resolve({ ok: false, ms: Date.now() - started, error: e.message });
+        }
+      });
+    }
+
+    const servers = parseLegacyServers(url.searchParams.get("servers") || "");
+    const timeoutMs = Math.max(3000, Math.min(30000, parseInt(url.searchParams.get("timeout_ms") || "12000", 10) || 12000));
+    const rows = await Promise.all(servers.map(async (srv) => {
+      const target = new URL(`${srv.base}/recovery`);
+      target.searchParams.set("include_single", "1");
+      target.searchParams.set("_ts", String(Date.now()));
+      const fetched = await fetchJsonLegacy(target, timeoutMs);
+      const jobs = fetched.ok && fetched.data && Array.isArray(fetched.data.jobs) ? fetched.data.jobs : [];
+      return {
+        name: srv.name,
+        base: srv.base,
+        ok: fetched.ok && fetched.data && fetched.data.ok !== false,
+        ms: fetched.ms || 0,
+        error: fetched.ok ? "" : fetched.error || "Cannot reach server",
+        count: jobs.length,
+        data: fetched.data || null,
+        jobs,
+      };
+    }));
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      server_time: nowIso(),
+      online: rows.filter((r) => r.ok).length,
+      offline: rows.filter((r) => !r.ok).length,
+      servers: rows,
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/resume-batch") {
+    let parsed;
+    try { parsed = await readJsonBody(req); }
+    catch (e) { return jsonResponse(res, 400, { ok: false, error: e.message }); }
+
+    try {
+      if (!legacyRecoveryAvailable()) {
+        return jsonResponse(res, 500, { ok: false, error: "Legacy recovery module is not available. Install utils/recovery.js and restart PM2." });
+      }
+      const jobId = String(parsed.job_id || parsed.jobId || parsed.batch_id || parsed.batchId || "").trim();
+      if (!jobId || !/^[A-Za-z0-9_.-]+$/.test(jobId)) {
+        return jsonError(res, 400, "job_id is required and must be alphanumeric");
+      }
+
+      const jobs = legacyRecovery.findInterruptedJobs() || [];
+      const job = jobs.find((j) => String(j.jobId || j.job_id || "") === jobId || String(j.batchId || j.batch_id || "") === jobId);
+      if (!job) return jsonError(res, 404, `No interrupted job found with id: ${jobId}`);
+
+      if (!job.domainListFile || !fs.existsSync(job.domainListFile)) {
+        if (!Array.isArray(job.domainList) || job.domainList.length === 0) {
+          return jsonError(res, 409, `Cannot resume ${jobId}: domain list file is gone and no domain snapshot exists`);
+        }
+        ensureDir(API_BATCH_DIR);
+        const tmpListPath = path.join(API_BATCH_DIR, `${jobId}_domains_resume.txt`);
+        fs.writeFileSync(tmpListPath, uniqueDomains(job.domainList).join("\n") + "\n", "utf8");
+        job.domainListFile = tmpListPath;
+        console.log(`[recovery] Built temporary domain list: ${tmpListPath}`);
+      }
+
+      const activeKey = `multi:${jobId}`;
+      if (activeJobs.has(activeKey)) return jsonError(res, 409, `Job ${jobId} is already running`);
+
+      const env = legacyRecovery.buildResumeEnv(job);
+      const child = spawn(process.execPath, [path.join(TOOL_DIR, "multi-audit.js"), job.domainListFile], {
+        env,
+        cwd: TOOL_DIR,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (!child || !child.pid) return jsonError(res, 500, "Failed to spawn resume process");
+
+      activeJobs.set(activeKey, {
+        type: "multi",
+        batchId: job.batchId || jobId,
+        jobId,
+        pid: child.pid,
+        startedAt: nowIso(),
+        domains: Array.isArray(job.domainList) ? job.domainList : [],
+        domainCount: Array.isArray(job.domainList) ? job.domainList.length : 0,
+        resumed: true,
+        recovery: true,
+      });
+
+      const logPath = path.join(OUTPUT_DIR, `progress_${jobId}.log`);
+      try {
+        const logStream = fs.createWriteStream(logPath, { flags: "a" });
+        logStream.write(`\n\n=== RESUMED at ${nowIso()} ===\n`);
+        if (child.stdout) child.stdout.pipe(logStream, { end: false });
+        if (child.stderr) child.stderr.pipe(logStream, { end: false });
+      } catch (_) {}
+
+      child.on("exit", (code, signal) => {
+        activeJobs.delete(activeKey);
+        console.log(`[recovery] resumed job ${jobId} exited code=${code} signal=${signal}`);
+      });
+      child.unref();
+
+      return jsonResponse(res, 200, {
+        ok: true,
+        job_id: jobId,
+        batch_id: job.batchId || jobId,
+        pid: child.pid,
+        resumed_at: nowIso(),
+        pending_count: job.pendingCount || 0,
+        checkpoint_count: job.checkpointCount || 0,
+        message: `Resumed: ${job.pendingCount || 0} domain(s) pending, ${job.checkpointCount || 0} already done (will be skipped)`,
+      });
+    } catch (e) {
+      console.error(`[recovery] /resume-batch error: ${e.stack || e.message}`);
+      return jsonError(res, 500, `Resume failed: ${e.message}`);
+    }
+  }
+
+  if (method === "POST" && url.pathname === "/mark-stopped") {
+    let parsed;
+    try { parsed = await readJsonBody(req); }
+    catch (e) { return jsonResponse(res, 400, { ok: false, error: e.message }); }
+
+    try {
+      if (!legacyRecoveryAvailable()) {
+        return jsonResponse(res, 500, { ok: false, error: "Legacy recovery module is not available. Install utils/recovery.js and restart PM2." });
+      }
+      const jobId = String(parsed.job_id || parsed.jobId || parsed.batch_id || parsed.batchId || "").trim();
+      if (!jobId || !/^[A-Za-z0-9_.-]+$/.test(jobId)) return jsonError(res, 400, "job_id is required");
+      const result = legacyRecovery.markJobStopped(jobId);
+      if (!result || !result.ok) return jsonError(res, 500, (result && result.error) || "Failed to mark job stopped");
+      activeJobs.delete(`multi:${jobId}`);
+      activeJobs.delete(`single:${jobId}`);
+      return jsonResponse(res, 200, {
+        ok: true,
+        job_id: jobId,
+        stopped_at: nowIso(),
+        message: `Job ${jobId} marked as STOPPED.`,
+      });
+    } catch (e) {
+      return jsonError(res, 500, `mark-stopped failed: ${e.message}`);
     }
   }
 
 
-  if (method === "GET" && url.pathname === "/domains-monitor") {
-    try {
-      const html = fs.readFileSync(path.join(TOOL_DIR, "domains-monitor.html"), "utf8");
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
-      });
-      return res.end(html);
-    } catch (e) {
-      return jsonResponse(res, 500, { ok: false, error: "Could not load domains-monitor.html: " + e.message });
+  // ── GET /recovery-jobs-all ────────────────────────────────────────────────
+  // Server-side recovery monitor aggregator. FileMaker 17 Web Viewer uses an
+  // old browser engine and can hang on cross-origin XHR calls. This endpoint
+  // lets the HTML call only VM1, while VM1 fetches /recovery-jobs from V1-V6.
+  if (method === "GET" && url.pathname === "/recovery-jobs-all") {
+    const https = require("https");
+
+    function decodeRepeated(value) {
+      let out = String(value || "").trim();
+      for (let i = 0; i < 5; i++) {
+        const before = out;
+        try {
+          out = decodeURIComponent(out.replace(/\+/g, " ")).trim();
+        } catch (_) {
+          break;
+        }
+        if (out === before) break;
+      }
+      return out;
     }
+
+    function parseRecoveryServers(rawServers) {
+      const raw = decodeRepeated(rawServers);
+      if (!raw) {
+        const fallbackHost = req.headers.host || `localhost:${PORT}`;
+        return [{ name: "Server", base: `http://${fallbackHost}` }];
+      }
+
+      return raw
+        .split(",")
+        .map((row) => decodeRepeated(row).trim())
+        .filter(Boolean)
+        .map((row) => {
+          const pipeAt = row.indexOf("|");
+          const name = decodeRepeated(
+            pipeAt >= 0 ? row.slice(0, pipeAt).trim() : row.trim(),
+          );
+          const base = decodeRepeated(
+            pipeAt >= 0 ? row.slice(pipeAt + 1).trim() : row.trim(),
+          );
+          return {
+            name: name || base,
+            base: String(base || "").replace(/\/+$/, ""),
+          };
+        })
+        .filter((srv) => srv.name && srv.base);
+    }
+
+    function getJsonFromUrl(targetUrl, timeoutMs) {
+      return new Promise((resolve) => {
+        const startedAt = Date.now();
+        let finished = false;
+        let body = "";
+
+        function done(payload) {
+          if (finished) return;
+          finished = true;
+          resolve({ ...payload, ms: Date.now() - startedAt });
+        }
+
+        try {
+          const client = targetUrl.protocol === "https:" ? https : http;
+          const remoteReq = client.request(
+            targetUrl,
+            {
+              method: "GET",
+              headers: {
+                Accept: "application/json",
+                "Cache-Control": "no-cache",
+              },
+            },
+            (remoteRes) => {
+              remoteRes.setEncoding("utf8");
+              remoteRes.on("data", (chunk) => {
+                body += chunk;
+                if (body.length > 10 * 1024 * 1024) {
+                  remoteReq.destroy(new Error("Response too large"));
+                }
+              });
+              remoteRes.on("end", () => {
+                if (remoteRes.statusCode < 200 || remoteRes.statusCode >= 300) {
+                  return done({
+                    ok: false,
+                    error: `HTTP ${remoteRes.statusCode}: ${body.slice(0, 300)}`,
+                  });
+                }
+                try {
+                  done({ ok: true, data: JSON.parse(body || "{}") });
+                } catch (e) {
+                  done({
+                    ok: false,
+                    error: `Invalid JSON: ${body.slice(0, 300)}`,
+                  });
+                }
+              });
+            },
+          );
+
+          remoteReq.setTimeout(timeoutMs || 10000, () => {
+            remoteReq.destroy(new Error("Timeout"));
+          });
+          remoteReq.on("error", (e) => done({ ok: false, error: e.message }));
+          remoteReq.end();
+        } catch (e) {
+          done({ ok: false, error: e.message });
+        }
+      });
+    }
+
+    const includeSingle =
+      String(url.searchParams.get("include_single") || "1") !== "0" ? "1" : "0";
+    const includeRunning =
+      String(url.searchParams.get("include_running") || "0") === "1" ? "1" : "0";
+    const onlyResume =
+      String(url.searchParams.get("only_resume") || "1") !== "0" ? "1" : "0";
+    const servers = parseRecoveryServers(url.searchParams.get("servers") || "");
+    const timeoutMs = Math.max(
+      3000,
+      Math.min(30000, parseInt(url.searchParams.get("timeout_ms") || "12000", 10) || 12000),
+    );
+
+    const results = await Promise.all(
+      servers.map(async (srv) => {
+        const target = new URL(
+          `${srv.base}/recovery-jobs?include_single=${encodeURIComponent(includeSingle)}&include_running=${encodeURIComponent(includeRunning)}&only_resume=${encodeURIComponent(onlyResume)}`,
+        );
+        target.searchParams.set("_ts", String(Date.now()));
+        const fetched = await getJsonFromUrl(target, timeoutMs);
+        const jobs =
+          fetched.ok && fetched.data && Array.isArray(fetched.data.jobs)
+            ? fetched.data.jobs
+            : [];
+        return {
+          name: srv.name,
+          base: srv.base,
+          ok: fetched.ok && fetched.data && fetched.data.ok !== false,
+          ms: fetched.ms || 0,
+          error: fetched.ok ? "" : fetched.error || "Cannot reach server",
+          count: jobs.length,
+          data: fetched.data || null,
+          jobs,
+        };
+      }),
+    );
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      server_time: nowIso(),
+      online: results.filter((r) => r.ok).length,
+      offline: results.filter((r) => !r.ok).length,
+      servers: results,
+    });
+  }
+
+  // ── GET /recovery-jobs ─────────────────────────────────────────────────────
+  // Lists interrupted/queued/stopped batches that can be continued after a VM,
+  // Node, or PM2 restart. This endpoint is read-only, except it may classify
+  // orphaned RUNNING metadata as INTERRUPTED so the monitor shows the truth.
+  if (method === "GET" && url.pathname === "/recovery-jobs") {
+    const includeSingles =
+      String(url.searchParams.get("include_single") || "1") !== "0";
+    const includeRunning =
+      String(url.searchParams.get("include_running") || "0") === "1";
+    const onlyResume =
+      String(url.searchParams.get("only_resume") || "1") !== "0";
+
+    function shouldShowRecoveryJob(summary) {
+      if (!summary) return false;
+      if (!includeRunning && summary.running) return false;
+
+      if (!onlyResume) return true;
+
+      const remaining = parseInt(summary.remaining || "0", 10) || 0;
+      if (remaining <= 0) return false;
+
+      const s = String(summary.status || summary.raw_status || "").toLowerCase();
+      if (
+        s === "needs_resume" ||
+        s === "interrupted" ||
+        s === "stopped" ||
+        s === "halted" ||
+        s === "queued" ||
+        s === "pending" ||
+        s === "waiting" ||
+        s === "waiting_gap" ||
+        s === "error"
+      ) {
+        return true;
+      }
+
+      // A meta record can still say RUNNING/SCANNING after PM2 or the VM
+      // restarted. If there is no active worker, recoverySummaryForBatch()
+      // normally maps that to "interrupted"; this fallback keeps the monitor
+      // strict even if a legacy meta file bypasses that mapping.
+      const raw = String(summary.raw_status || "").toUpperCase();
+      return (
+        !summary.running &&
+        (raw === "RUNNING" ||
+          raw === "STARTING" ||
+          raw === "PROCESSING" ||
+          raw === "SCANNING" ||
+          raw === "ACTIVE" ||
+          raw === "WAITING_GAP" ||
+          raw === "RECOVERING" ||
+          raw === "ERROR")
+      );
+    }
+
+    const jobs = [];
+    const marked = [];
+
+    for (const rec of listBatchMetaRecords()) {
+      const meta = rec.meta;
+      const batchId = meta.batchId;
+      const status = String(meta.status || "").toUpperCase();
+      const active = activeJobs.has(`multi:${batchId}`);
+
+      if (
+        !active &&
+        (status === "RUNNING" ||
+          status === "STARTING" ||
+          status === "PROCESSING" ||
+          status === "SCANNING" ||
+          status === "ACTIVE" ||
+          status === "WAITING_GAP" ||
+          status === "RECOVERING" ||
+          status === "ERROR")
+      ) {
+        meta.previousStatus = meta.previousStatus || status;
+        meta.status = "INTERRUPTED";
+        meta.interruptedAt = meta.interruptedAt || nowIso();
+        meta.interruptReason =
+          meta.interruptReason || "NO_ACTIVE_PROCESS_AFTER_API_RESTART";
+        try {
+          saveBatchMeta(meta);
+          marked.push(batchId);
+        } catch (_) {}
+      }
+
+      const summary = recoverySummaryForBatch(meta);
+      if (shouldShowRecoveryJob(summary)) jobs.push(summary);
+    }
+
+    if (includeSingles) {
+      for (const item of listInterruptedSingleJobs()) {
+        if (shouldShowRecoveryJob(item)) jobs.push(item);
+      }
+    }
+
+    jobs.sort((a, b) => {
+      const as = a.status === "interrupted" || a.status === "stopped" ? 0 : 1;
+      const bs = b.status === "interrupted" || b.status === "stopped" ? 0 : 1;
+      if (as !== bs) return as - bs;
+      const at = Date.parse(a.updated_at || a.started_at || "") || 0;
+      const bt = Date.parse(b.updated_at || b.started_at || "") || 0;
+      return bt - at;
+    });
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      api_started_at: API_STARTED_AT,
+      server_time: nowIso(),
+      count: jobs.length,
+      filters: {
+        include_single: includeSingles,
+        include_running: includeRunning,
+        only_resume: onlyResume,
+      },
+      marked_interrupted: marked,
+      jobs,
+    });
+  }
+
+  // ── POST /recovery-continue ────────────────────────────────────────────────
+  // Body for multi:  { "type":"multi", "batch_id":"batch_..." }
+  // Body for single: { "type":"single", "job_id":"...", "domain":"example.com" }
+  if (method === "POST" && url.pathname === "/recovery-continue") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const type = String(
+      parsed.type || (parsed.batch_id ? "multi" : "single"),
+    ).toLowerCase();
+    if (type === "single") {
+      const result = spawnRecoveredSingleJob(
+        parsed.domain,
+        String(parsed.job_id || "").trim(),
+        parsed,
+      );
+      return jsonResponse(res, result.ok ? 200 : result.status || 400, result);
+    }
+
+    const batchId = String(parsed.batch_id || "").trim();
+    const result = spawnRecoveredMultiBatch(batchId, parsed);
+    // Attach the server's own host so FileMaker can store it on domain records.
+    // We derive it from the Host header (e.g. "v6.in-depth.com:3000").
+    const selfHost = (req.headers.host || "").replace(/:\d+$/, "");
+    if (result.ok) {
+      result.server_host = selfHost;
+    }
+    return jsonResponse(res, result.ok ? 200 : result.status || 400, result);
+  }
+
+  // ── POST /recovery-cancel ──────────────────────────────────────────────────
+  // Marks a recoverable batch/single as cancelled. It does not delete result
+  // folders; it only prevents it from showing as recoverable.
+  if (method === "POST" && url.pathname === "/recovery-cancel") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const type = String(
+      parsed.type || (parsed.batch_id ? "multi" : "single"),
+    ).toLowerCase();
+    if (type === "single") {
+      const jobId = String(parsed.job_id || "").trim();
+      if (!jobId)
+        return jsonResponse(res, 400, { ok: false, error: "Missing job_id" });
+      writeTextSafe(
+        doneFlagPath(jobId),
+        `cancelled\nfinishedAt=${nowIso()}\nrecovery_cancel=1`,
+      );
+      return jsonResponse(res, 200, {
+        ok: true,
+        type: "single",
+        job_id: jobId,
+        status: "cancelled",
+      });
+    }
+
+    const batchId = String(parsed.batch_id || "").trim();
+    if (!isSafeBatchId(batchId))
+      return jsonResponse(res, 400, { ok: false, error: "Invalid batch_id" });
+
+    const key = `multi:${batchId}`;
+    const job = activeJobs.get(key) || null;
+    let killed = false;
+    if (job) {
+      killed = killProcess(job.pid);
+      activeJobs.delete(key);
+      releaseBatchDomainLocks(job.domains || [], job.pid);
+      stopBatchTimeWatcher(batchId);
+    }
+
+    const meta = getBatchMeta(batchId) || { batchId };
+    meta.status = "CANCELLED";
+    meta.cancelledAt = nowIso();
+    meta.finishedAt = meta.cancelledAt;
+    meta.cancelReason = parsed.reason || "manual recovery cancel";
+    saveBatchMeta(meta);
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      type: "multi",
+      batch_id: batchId,
+      status: "cancelled",
+      killed,
+    });
+  }
+
+  // ── POST /recovery-mark-stopped ────────────────────────────────────────────
+  // Use this if FileMaker wants to explicitly flag a batch as interrupted.
+  if (method === "POST" && url.pathname === "/recovery-mark-stopped") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const batchId = String(parsed.batch_id || "").trim();
+    if (!isSafeBatchId(batchId))
+      return jsonResponse(res, 400, { ok: false, error: "Invalid batch_id" });
+    const meta = getBatchMeta(batchId);
+    if (!meta)
+      return jsonResponse(res, 404, { ok: false, error: "Batch not found" });
+    meta.previousStatus = meta.status;
+    meta.status = "INTERRUPTED";
+    meta.interruptedAt = meta.interruptedAt || nowIso();
+    meta.interruptReason = parsed.reason || "MANUAL_MARK_STOPPED";
+    saveBatchMeta(meta);
+    return jsonResponse(res, 200, {
+      ok: true,
+      batch_id: batchId,
+      status: "interrupted",
+    });
+  }
+
+  // ── POST /recovery-purge ────────────────────────────────────────────────────
+  // Deletes ALL metadata files for a batch so the Recovery Monitor stops
+  // showing it. Useful when you delete scan folders manually (e.g. for a clean
+  // retest) and want the stale entries removed from the monitor.
+  //
+  // Body: { "batch_id": "batch_..." }
+  //
+  // Refuses if the batch has an active running worker.
+  // Does NOT delete scan result folders (date folders under SCAN_ROOT) —
+  // those are already gone (or the caller deleted them deliberately).
+  if (method === "POST" && url.pathname === "/recovery-purge") {
+    let parsed;
+    try {
+      parsed = await readJsonBody(req);
+    } catch (e) {
+      return jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+
+    const batchId = String(parsed.batch_id || "").trim();
+    if (!isSafeBatchId(batchId)) {
+      return jsonResponse(res, 400, { ok: false, error: "Invalid batch_id" });
+    }
+
+    // Refuse if a worker is actively running for this batch.
+    if (activeJobs.has(`multi:${batchId}`)) {
+      return jsonResponse(res, 409, {
+        ok: false,
+        error: "Batch is currently running. Stop it before purging.",
+        batch_id: batchId,
+      });
+    }
+
+    const deleted = [];
+    const failed = [];
+
+    function tryDelete(filePath, label) {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          deleted.push(label || path.basename(filePath));
+        }
+      } catch (e) {
+        failed.push((label || path.basename(filePath)) + ": " + e.message);
+      }
+    }
+
+    // 1. Batch meta JSON — the primary file that makes the monitor show it.
+    tryDelete(path.join(API_BATCH_DIR, `batch_${batchId}.json`), "batch_meta");
+
+    // 2. Domain list file.
+    tryDelete(path.join(API_BATCH_DIR, `${batchId}_domains.txt`), "domain_list");
+
+    // 3. Progress / log files.
+    tryDelete(path.join(OUTPUT_DIR, `progress_${batchId}.txt`), "progress_txt");
+    tryDelete(path.join(OUTPUT_DIR, `progress_${batchId}.log`), "progress_log");
+
+    // 4. Checkpoint file.
+    tryDelete(path.join(OUTPUT_DIR, `checkpoint_${batchId}.json`), "checkpoint");
+
+    // 5. Per-batch failed CSV.
+    tryDelete(path.join(OUTPUT_DIR, `failed_${batchId}.csv`), "failed_csv");
+
+    // 6. latest_path_<batchId>.txt (direct batch-level, if present).
+    tryDelete(path.join(OUTPUT_DIR, `latest_path_${batchId}.txt`), "latest_path_batch");
+
+    // 7. Per-domain child files: done flags, latest_path, progress files.
+    //    Read the domain list from the already-deleted meta first; if it was
+    //    already purged above we fall back to the API_BATCH_DIR file.
+    const domainListFile = path.join(API_BATCH_DIR, `${batchId}_domains.txt`);
+    let childDomains = [];
+    try {
+      // File may already be deleted above — that's fine, catch handles it.
+      childDomains = readDomainsFromFile(domainListFile);
+    } catch (_) {}
+
+    // Also try reading from the already-parsed meta (before we deleted it).
+    // If meta had a domainListFile path, try that too.
+    const altDomainFiles = [
+      path.join(API_BATCH_DIR, `${batchId}_queued_domains.txt`),
+    ];
+    for (const f of altDomainFiles) {
+      if (!childDomains.length) {
+        try { childDomains = readDomainsFromFile(f); } catch (_) {}
+      }
+    }
+
+    for (const domain of childDomains) {
+      const d = sanitizeDomain(domain);
+      if (!d) continue;
+      const childJobId = batchChildJobId(batchId, d);
+      tryDelete(path.join(OUTPUT_DIR, `done_${childJobId}.flag`),    `done_flag:${d}`);
+      tryDelete(path.join(OUTPUT_DIR, `latest_path_${childJobId}.txt`), `latest_path:${d}`);
+      tryDelete(path.join(OUTPUT_DIR, `progress_${childJobId}.txt`), `progress:${d}`);
+      tryDelete(path.join(OUTPUT_DIR, `progress_${childJobId}.log`), `progress_log:${d}`);
+      tryDelete(path.join(OUTPUT_DIR, `wp_${safeWpFileKey(childJobId)}.json`), `wp_status_job:${d}`);
+      tryDelete(path.join(OUTPUT_DIR, `wp_${safeWpFileKey(d)}.json`), `wp_status_domain:${d}`);
+      tryDelete(path.join(OUTPUT_DIR, `lock_${d}.pid`),              `lock:${d}`);
+    }
+
+    console.log(
+      `[recovery-purge] batch_id=${batchId} deleted=${deleted.length} failed=${failed.length}`,
+    );
+
+    return jsonResponse(res, 200, {
+      ok: true,
+      batch_id: batchId,
+      deleted,
+      failed,
+      message:
+        deleted.length > 0
+          ? `Purged ${deleted.length} metadata file(s) for batch ${batchId}.`
+          : `No metadata files found for batch ${batchId} — already clean.`,
+    });
   }
 
   // ── GET /server-stats ────────────────────────────────────────────────────────
@@ -2640,7 +4642,10 @@ async function handleRequest(req, res) {
       b = Number(b) || 0;
       if (b <= 0) return "0 B";
       const units = ["B", "KB", "MB", "GB", "TB"];
-      const i = Math.min(units.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
+      const i = Math.min(
+        units.length - 1,
+        Math.floor(Math.log(b) / Math.log(1024)),
+      );
       return (b / Math.pow(1024, i)).toFixed(1) + " " + units[i];
     }
 
@@ -2673,8 +4678,12 @@ async function handleRequest(req, res) {
 
     function duDir(dir) {
       try {
-        const out = safeExec(`du -sb ${shellQuote(dir)} 2>/dev/null || echo "0\\t${String(dir).replace(/\"/g, '')}"`, { timeout: 10000 })
-          .toString().trim();
+        const out = safeExec(
+          `du -sb ${shellQuote(dir)} 2>/dev/null || echo "0\\t${String(dir).replace(/\"/g, "")}"`,
+          { timeout: 10000 },
+        )
+          .toString()
+          .trim();
         const bytes = parseInt(out.split("\t")[0], 10) || 0;
         return { path: dir, bytes, human: fmtBytes(bytes) };
       } catch (e) {
@@ -2684,19 +4693,28 @@ async function handleRequest(req, res) {
 
     function dfDisk(dir) {
       try {
-        const out = safeExec(`df -B1 --output=size,used,avail ${shellQuote(dir)} 2>/dev/null | tail -1`, { timeout: 10000 })
-          .toString().trim().split(/\s+/);
+        const out = safeExec(
+          `df -B1 --output=size,used,avail ${shellQuote(dir)} 2>/dev/null | tail -1`,
+          { timeout: 10000 },
+        )
+          .toString()
+          .trim()
+          .split(/\s+/);
         const total = parseInt(out[0], 10) || 0;
-        const used  = parseInt(out[1], 10) || 0;
+        const used = parseInt(out[1], 10) || 0;
         const avail = parseInt(out[2], 10) || 0;
         return {
-          total, used, available: avail,
-          totalHuman:     fmtBytes(total),
-          usedHuman:      fmtBytes(used),
+          total,
+          used,
+          available: avail,
+          totalHuman: fmtBytes(total),
+          usedHuman: fmtBytes(used),
           availableHuman: fmtBytes(avail),
           usedPct: total > 0 ? Math.round((used / total) * 100) : 0,
         };
-      } catch (e) { return { error: e.message }; }
+      } catch (e) {
+        return { error: e.message };
+      }
     }
 
     function readMemInfo() {
@@ -2744,8 +4762,13 @@ async function handleRequest(req, res) {
 
     function readCpuTimes() {
       try {
-        const firstLine = fs.readFileSync("/proc/stat", "utf8").split(/\r?\n/)[0] || "";
-        const parts = firstLine.trim().split(/\s+/).slice(1).map((v) => parseInt(v, 10) || 0);
+        const firstLine =
+          fs.readFileSync("/proc/stat", "utf8").split(/\r?\n/)[0] || "";
+        const parts = firstLine
+          .trim()
+          .split(/\s+/)
+          .slice(1)
+          .map((v) => parseInt(v, 10) || 0);
         if (parts.length < 4) return null;
         const idle = (parts[3] || 0) + (parts[4] || 0); // idle + iowait
         const total = parts.reduce((sum, n) => sum + n, 0);
@@ -2756,23 +4779,48 @@ async function handleRequest(req, res) {
     }
 
     function cpuUsageSnapshot(sampleMs) {
-      sampleMs = Math.max(100, Math.min(parseInt(sampleMs || "250", 10) || 250, 1000));
+      sampleMs = Math.max(
+        100,
+        Math.min(parseInt(sampleMs || "250", 10) || 250, 1000),
+      );
       const before = readCpuTimes();
       if (!before) {
-        return { usedPct: 0, idlePct: 0, sampleMs, error: "Could not read /proc/stat" };
+        return {
+          usedPct: 0,
+          idlePct: 0,
+          sampleMs,
+          error: "Could not read /proc/stat",
+        };
       }
 
       // Short local sample. This gives real CPU usage for the dashboard, not only load average.
-      safeExec(`sleep ${Math.max(0.1, sampleMs / 1000).toFixed(3)}`, { timeout: sampleMs + 1000, maxBuffer: 8 * 1024 });
+      safeExec(`sleep ${Math.max(0.1, sampleMs / 1000).toFixed(3)}`, {
+        timeout: sampleMs + 1000,
+        maxBuffer: 8 * 1024,
+      });
 
       const after = readCpuTimes();
       if (!after) {
-        return { usedPct: 0, idlePct: 0, sampleMs, error: "Could not read /proc/stat after sample" };
+        return {
+          usedPct: 0,
+          idlePct: 0,
+          sampleMs,
+          error: "Could not read /proc/stat after sample",
+        };
       }
 
       const totalDelta = after.total - before.total;
       const idleDelta = after.idle - before.idle;
-      const usedPct = totalDelta > 0 ? Math.max(0, Math.min(100, Math.round(((totalDelta - idleDelta) / totalDelta) * 100))) : 0;
+      const usedPct =
+        totalDelta > 0
+          ? Math.max(
+              0,
+              Math.min(
+                100,
+                Math.round(((totalDelta - idleDelta) / totalDelta) * 100),
+              ),
+            )
+          : 0;
       return {
         usedPct,
         idlePct: Math.max(0, Math.min(100, 100 - usedPct)),
@@ -2781,7 +4829,9 @@ async function handleRequest(req, res) {
     }
 
     function parsePsLine(line) {
-      const m = String(line || "").match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+([0-9.]+)\s+([0-9.]+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+      const m = String(line || "").match(
+        /^\s*(\d+)\s+(\d+)\s+(\S+)\s+([0-9.]+)\s+([0-9.]+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/,
+      );
       if (!m) return null;
       const rssBytes = (parseInt(m[6], 10) || 0) * 1024;
       const etimes = parseInt(m[7], 10) || 0;
@@ -2803,32 +4853,50 @@ async function handleRequest(req, res) {
     function psTop(sortBy, limit) {
       limit = Math.max(1, Math.min(parseInt(limit || "6", 10) || 6, 20));
       const sort = sortBy === "cpu" ? "-pcpu" : "-rss";
-      const out = safeExec(`ps -eo pid,ppid,stat,pcpu,pmem,rss,etimes,comm,args --sort=${sort} --no-headers 2>/dev/null | head -n ${limit}`, {
-        timeout: 5000,
-        maxBuffer: 1024 * 1024,
-      });
-      return out.split(/\r?\n/).map(parsePsLine).filter(Boolean).slice(0, limit);
+      const out = safeExec(
+        `ps -eo pid,ppid,stat,pcpu,pmem,rss,etimes,comm,args --sort=${sort} --no-headers 2>/dev/null | head -n ${limit}`,
+        {
+          timeout: 5000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      return out
+        .split(/\r?\n/)
+        .map(parsePsLine)
+        .filter(Boolean)
+        .slice(0, limit);
     }
 
     function suspectProcesses(limit) {
       limit = Math.max(1, Math.min(parseInt(limit || "8", 10) || 8, 20));
-      const stuckSeconds = parseInt(process.env.SERVER_STATS_STUCK_SECONDS || "1800", 10) || 1800;
-      const out = safeExec("ps -eo pid,ppid,stat,pcpu,pmem,rss,etimes,comm,args --no-headers 2>/dev/null", {
-        timeout: 5000,
-        maxBuffer: 3 * 1024 * 1024,
-      });
+      const stuckSeconds =
+        parseInt(process.env.SERVER_STATS_STUCK_SECONDS || "1800", 10) || 1800;
+      const out = safeExec(
+        "ps -eo pid,ppid,stat,pcpu,pmem,rss,etimes,comm,args --no-headers 2>/dev/null",
+        {
+          timeout: 5000,
+          maxBuffer: 3 * 1024 * 1024,
+        },
+      );
       const rows = out.split(/\r?\n/).map(parsePsLine).filter(Boolean);
       return rows
         .filter((p) => {
           const args = String(p.args || "").toLowerCase();
           const command = String(p.command || "").toLowerCase();
           const stateBad = /[DZ]/.test(p.stat || "");
-          const longScanner = p.elapsedSeconds >= stuckSeconds && /(node|chrome|chromium|multi-audit|api-server|playwright|puppeteer)/i.test(command + " " + args);
-          const resourceHeavy = (p.cpuPct >= 80 || p.rssBytes >= 750 * 1024 * 1024) && p.elapsedSeconds >= 300;
+          const longScanner =
+            p.elapsedSeconds >= stuckSeconds &&
+            /(node|chrome|chromium|multi-audit|api-server|playwright|puppeteer)/i.test(
+              command + " " + args,
+            );
+          const resourceHeavy =
+            (p.cpuPct >= 80 || p.rssBytes >= 750 * 1024 * 1024) &&
+            p.elapsedSeconds >= 300;
           return stateBad || longScanner || resourceHeavy;
         })
         .sort((a, b) => {
-          if (/[DZ]/.test(a.stat) !== /[DZ]/.test(b.stat)) return /[DZ]/.test(a.stat) ? -1 : 1;
+          if (/[DZ]/.test(a.stat) !== /[DZ]/.test(b.stat))
+            return /[DZ]/.test(a.stat) ? -1 : 1;
           return b.elapsedSeconds - a.elapsedSeconds;
         })
         .slice(0, limit);
@@ -2837,7 +4905,10 @@ async function handleRequest(req, res) {
     function redactLogLine(line) {
       return String(line || "")
         .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
-        .replace(/((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+/ig, "$1***")
+        .replace(
+          /((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+/gi,
+          "$1***",
+        )
         .slice(0, 500);
     }
 
@@ -2861,9 +4932,17 @@ async function handleRequest(req, res) {
       envFiles.forEach((f) => addCandidateLogFile(list, seen, f));
 
       addCandidateLogFile(list, seen, GLOBAL_FAILED_LOG_PATH);
-      addCandidateLogFile(list, seen, path.join(OUTPUT_DIR, "failed_scans.csv"));
+      addCandidateLogFile(
+        list,
+        seen,
+        path.join(OUTPUT_DIR, "failed_scans.csv"),
+      );
       addCandidateLogFile(list, seen, path.join(TOOL_DIR, "api-server.log"));
-      addCandidateLogFile(list, seen, path.join(TOOL_DIR, "api-server-error.log"));
+      addCandidateLogFile(
+        list,
+        seen,
+        path.join(TOOL_DIR, "api-server-error.log"),
+      );
 
       const pm2Dirs = [
         path.join(os.homedir() || "", ".pm2", "logs"),
@@ -2874,36 +4953,53 @@ async function handleRequest(req, res) {
       for (const dir of pm2Dirs) {
         try {
           if (!dir || !fs.existsSync(dir)) continue;
-          const entries = fs.readdirSync(dir)
+          const entries = fs
+            .readdirSync(dir)
             .filter((name) => /\.log$/i.test(name))
             .map((name) => path.join(dir, name));
-          entries.forEach((filePath) => addCandidateLogFile(list, seen, filePath));
+          entries.forEach((filePath) =>
+            addCandidateLogFile(list, seen, filePath),
+          );
         } catch (_) {}
       }
 
       for (const job of activeJobs.values()) {
         if (job && job.logFile) addCandidateLogFile(list, seen, job.logFile);
-        if (job && job.jobId) addCandidateLogFile(list, seen, logFilePath(job.jobId));
-        if (job && job.batchId) addCandidateLogFile(list, seen, logFilePath(job.batchId));
+        if (job && job.jobId)
+          addCandidateLogFile(list, seen, logFilePath(job.jobId));
+        if (job && job.batchId)
+          addCandidateLogFile(list, seen, logFilePath(job.batchId));
       }
 
       return list.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 12);
     }
 
     function tailLines(filePath, lineCount) {
-      lineCount = Math.max(20, Math.min(parseInt(lineCount || "160", 10) || 160, 1000));
-      return safeExec(`tail -n ${lineCount} ${shellQuote(filePath)} 2>/dev/null`, {
-        timeout: 4000,
-        maxBuffer: 512 * 1024,
-      }).split(/\r?\n/).filter(Boolean);
+      lineCount = Math.max(
+        20,
+        Math.min(parseInt(lineCount || "160", 10) || 160, 1000),
+      );
+      return safeExec(
+        `tail -n ${lineCount} ${shellQuote(filePath)} 2>/dev/null`,
+        {
+          timeout: 4000,
+          maxBuffer: 512 * 1024,
+        },
+      )
+        .split(/\r?\n/)
+        .filter(Boolean);
     }
 
     function collectRecentLogErrors() {
-      if (String(process.env.SERVER_STATS_INCLUDE_LOGS || "1") === "0") return [];
+      if (String(process.env.SERVER_STATS_INCLUDE_LOGS || "1") === "0")
+        return [];
 
-      const tailCount = parseInt(process.env.SERVER_STATS_LOG_TAIL_LINES || "160", 10) || 160;
-      const perFileLimit = parseInt(process.env.SERVER_STATS_LOG_ERROR_LIMIT || "6", 10) || 6;
-      const pattern = /(error|failed|failure|fatal|exception|timeout|timed out|cannot|unreachable|denied|refused|crash|killed|oom|out of memory|ENOMEM|EADDRINUSE|ERR_|WARN|⚠|❌)/i;
+      const tailCount =
+        parseInt(process.env.SERVER_STATS_LOG_TAIL_LINES || "160", 10) || 160;
+      const perFileLimit =
+        parseInt(process.env.SERVER_STATS_LOG_ERROR_LIMIT || "6", 10) || 6;
+      const pattern =
+        /(error|failed|failure|fatal|exception|timeout|timed out|cannot|unreachable|denied|refused|crash|killed|oom|out of memory|ENOMEM|EADDRINUSE|ERR_|WARN|⚠|❌)/i;
 
       const groups = [];
       for (const item of candidateLogFiles()) {
@@ -2928,9 +5024,13 @@ async function handleRequest(req, res) {
       const out = [];
       for (const [key, job] of activeJobs.entries()) {
         try {
-          const startedAt = job.startedAt || job.started_at || job.createdAt || null;
+          const startedAt =
+            job.startedAt || job.started_at || job.createdAt || null;
           const startedMs = startedAt ? new Date(startedAt).getTime() : null;
-          const ageSeconds = startedMs && !isNaN(startedMs) ? Math.max(0, Math.floor((now - startedMs) / 1000)) : null;
+          const ageSeconds =
+            startedMs && !isNaN(startedMs)
+              ? Math.max(0, Math.floor((now - startedMs) / 1000))
+              : null;
           const progress = job.jobId ? readProgress(job.jobId) : null;
           out.push({
             key,
@@ -2938,24 +5038,27 @@ async function handleRequest(req, res) {
             jobId: job.jobId || "",
             batchId: job.batchId || "",
             domain: job.domain || "",
-            domainCount: job.domainCount || (Array.isArray(job.domains) ? job.domains.length : 0),
+            domainCount:
+              job.domainCount ||
+              (Array.isArray(job.domains) ? job.domains.length : 0),
             pid: job.pid || "",
             startedAt,
             ageSeconds,
             ageHuman: ageSeconds == null ? "" : fmtDuration(ageSeconds),
             status: progress && progress.status ? progress.status : "",
-            lastDomain: progress && progress.last_domain ? progress.last_domain : "",
+            lastDomain:
+              progress && progress.last_domain ? progress.last_domain : "",
           });
         } catch (_) {}
       }
       return out.slice(0, 12);
     }
 
-    const mem  = process.memoryUsage();
+    const mem = process.memoryUsage();
     const sysMem = systemMemoryStats();
     const disk = dfDisk(SCAN_ROOT);
     const dirs = {
-      scan_root:  duDir(SCAN_ROOT),
+      scan_root: duDir(SCAN_ROOT),
       output_dir: duDir(OUTPUT_DIR),
     };
 
@@ -2967,7 +5070,8 @@ async function handleRequest(req, res) {
         batchFolderCount++;
         try {
           for (const d of fs.readdirSync(path.join(SCAN_ROOT, e))) {
-            if (fs.statSync(path.join(SCAN_ROOT, e, d)).isDirectory()) domainFolderCount++;
+            if (fs.statSync(path.join(SCAN_ROOT, e, d)).isDirectory())
+              domainFolderCount++;
           }
         } catch (_) {}
       }
@@ -2980,41 +5084,63 @@ async function handleRequest(req, res) {
 
     const cpuCount = Math.max(1, (os.cpus() || []).length || 1);
     const loadavg = os.loadavg ? os.loadavg() : [0, 0, 0];
-    const cpuUsage = cpuUsageSnapshot(process.env.SERVER_STATS_CPU_SAMPLE_MS || "250");
-    const processLimit = parseInt(process.env.SERVER_STATS_PROCESS_LIMIT || "6", 10) || 6;
+    const cpuUsage = cpuUsageSnapshot(
+      process.env.SERVER_STATS_CPU_SAMPLE_MS || "250",
+    );
+    const processLimit =
+      parseInt(process.env.SERVER_STATS_PROCESS_LIMIT || "6", 10) || 6;
     const topMem = psTop("mem", processLimit);
     const topCpu = psTop("cpu", processLimit);
-    const suspects = suspectProcesses(process.env.SERVER_STATS_SUSPECT_LIMIT || "8");
+    const suspects = suspectProcesses(
+      process.env.SERVER_STATS_SUSPECT_LIMIT || "8",
+    );
     const recentLogErrors = collectRecentLogErrors();
     const activeJobDetails = activeJobSnapshot();
 
     const alerts = [];
-    const memWarnPct = parseInt(process.env.SERVER_STATS_MEM_WARN_PCT || "85", 10) || 85;
-    const diskWarnPct = parseInt(process.env.SERVER_STATS_DISK_WARN_PCT || "85", 10) || 85;
-    const cpuWarnPct = parseInt(process.env.SERVER_STATS_CPU_WARN_PCT || "85", 10) || 85;
-    if ((cpuUsage.usedPct || 0) >= cpuWarnPct) alerts.push(`High CPU usage: ${cpuUsage.usedPct}% used`);
-    if (sysMem.usedPct >= memWarnPct) alerts.push(`High system memory: ${sysMem.usedPct}% used (${sysMem.usedHuman} / ${sysMem.totalHuman})`);
-    if ((disk.usedPct || 0) >= diskWarnPct) alerts.push(`High disk usage: ${disk.usedPct}% used (${disk.usedHuman} / ${disk.totalHuman})`);
-    if ((loadavg[0] || 0) > cpuCount) alerts.push(`High load average: ${loadavg[0].toFixed(2)} on ${cpuCount} CPU cores`);
-    if (suspects.length) alerts.push(`${suspects.length} possible stuck/heavy process(es) found`);
-    if (recentLogErrors.length) alerts.push(`${recentLogErrors.length} log file(s) have recent warning/error lines`);
+    const memWarnPct =
+      parseInt(process.env.SERVER_STATS_MEM_WARN_PCT || "85", 10) || 85;
+    const diskWarnPct =
+      parseInt(process.env.SERVER_STATS_DISK_WARN_PCT || "85", 10) || 85;
+    const cpuWarnPct =
+      parseInt(process.env.SERVER_STATS_CPU_WARN_PCT || "85", 10) || 85;
+    if ((cpuUsage.usedPct || 0) >= cpuWarnPct)
+      alerts.push(`High CPU usage: ${cpuUsage.usedPct}% used`);
+    if (sysMem.usedPct >= memWarnPct)
+      alerts.push(
+        `High system memory: ${sysMem.usedPct}% used (${sysMem.usedHuman} / ${sysMem.totalHuman})`,
+      );
+    if ((disk.usedPct || 0) >= diskWarnPct)
+      alerts.push(
+        `High disk usage: ${disk.usedPct}% used (${disk.usedHuman} / ${disk.totalHuman})`,
+      );
+    if ((loadavg[0] || 0) > cpuCount)
+      alerts.push(
+        `High load average: ${loadavg[0].toFixed(2)} on ${cpuCount} CPU cores`,
+      );
+    if (suspects.length)
+      alerts.push(`${suspects.length} possible stuck/heavy process(es) found`);
+    if (recentLogErrors.length)
+      alerts.push(
+        `${recentLogErrors.length} log file(s) have recent warning/error lines`,
+      );
 
     return jsonResponse(res, 200, {
       ok: true,
       timestamp: new Date().toISOString(),
       disk: { mountpoint: SCAN_ROOT, ...disk },
       directories: dirs,
-      batch_folders:  batchFolderCount,
+      batch_folders: batchFolderCount,
       domain_folders: domainFolderCount,
-      active_jobs:    activeJobs.size,
+      active_jobs: activeJobs.size,
       active_job_details: activeJobDetails,
       memory: {
-        rss:        fmtBytes(mem.rss),
-        heapUsed:   fmtBytes(mem.heapUsed),
-        heapTotal:  fmtBytes(mem.heapTotal),
-        external:   fmtBytes(mem.external),
-        rssBytes:       mem.rss,
-        heapUsedBytes:  mem.heapUsed,
+        rss: fmtBytes(mem.rss),
+        heapUsed: fmtBytes(mem.heapUsed),
+        heapTotal: fmtBytes(mem.heapTotal),
+        external: fmtBytes(mem.external),
+        rssBytes: mem.rss,
+        heapUsedBytes: mem.heapUsed,
         heapTotalBytes: mem.heapTotal,
         systemTotal: sysMem.totalHuman,
         systemUsed: sysMem.usedHuman,
@@ -3043,12 +5169,11 @@ async function handleRequest(req, res) {
       suspect_processes: suspects,
       recent_log_errors: recentLogErrors,
       alerts,
-      node_version:    process.version,
-      uptime_seconds:  uptimeSec,
-      uptime_human:    `${ud}d ${uh}h ${um}m`,
+      node_version: process.version,
+      uptime_seconds: uptimeSec,
+      uptime_human: `${ud}d ${uh}h ${um}m`,
     });
   }
-
 
   // ── GET /server-stats-all ────────────────────────────────────────────────────
   // Server-side monitor aggregator. This lets FileMaker Web Viewer load one URL
@@ -3089,8 +5214,12 @@ async function handleRequest(req, res) {
         .filter(Boolean)
         .map((row) => {
           const pipeAt = row.indexOf("|");
-          const name = decodeRepeated(pipeAt >= 0 ? row.slice(0, pipeAt).trim() : row.trim());
-          const base = decodeRepeated(pipeAt >= 0 ? row.slice(pipeAt + 1).trim() : row.trim());
+          const name = decodeRepeated(
+            pipeAt >= 0 ? row.slice(0, pipeAt).trim() : row.trim(),
+          );
+          const base = decodeRepeated(
+            pipeAt >= 0 ? row.slice(pipeAt + 1).trim() : row.trim(),
+          );
           return {
             name: name || base,
             base: String(base || "").replace(/\/+$/, ""),
@@ -3124,7 +5253,7 @@ async function handleRequest(req, res) {
             {
               method: "GET",
               headers: {
-                "Accept": "application/json",
+                Accept: "application/json",
                 "Cache-Control": "no-cache",
               },
             },
@@ -3134,7 +5263,9 @@ async function handleRequest(req, res) {
               remoteRes.on("data", (chunk) => {
                 body += chunk;
                 if (body.length > 2 * 1024 * 1024) {
-                  try { reqStats.destroy(new Error("Response too large")); } catch (_) {}
+                  try {
+                    reqStats.destroy(new Error("Response too large"));
+                  } catch (_) {}
                 }
               });
 
@@ -3156,12 +5287,14 @@ async function handleRequest(req, res) {
                   });
                 }
               });
-            }
+            },
           );
 
           reqStats.setTimeout(timeoutMs, () => {
             done({ ok: false, error: `Timeout after ${timeoutMs}ms` });
-            try { reqStats.destroy(); } catch (_) {}
+            try {
+              reqStats.destroy();
+            } catch (_) {}
           });
 
           reqStats.on("error", (e) => {
@@ -3177,8 +5310,10 @@ async function handleRequest(req, res) {
 
     async function fetchOneServerStats(srv) {
       const timeoutRaw = parseInt(
-        url.searchParams.get("timeout_ms") || process.env.SERVER_STATS_TIMEOUT_MS || "8000",
-        10
+        url.searchParams.get("timeout_ms") ||
+          process.env.SERVER_STATS_TIMEOUT_MS ||
+          "8000",
+        10,
       );
       const timeoutMs = Math.max(1000, Math.min(timeoutRaw || 8000, 60000));
 
@@ -3216,7 +5351,10 @@ async function handleRequest(req, res) {
         url: statsUrl.toString(),
         ms: result.ms || 0,
         data: result.data,
-        error: result.data && result.data.ok ? undefined : "Server returned ok=false",
+        error:
+          result.data && result.data.ok
+            ? undefined
+            : "Server returned ok=false",
       };
     }
 
@@ -3235,17 +5373,24 @@ async function handleRequest(req, res) {
 
   if (method === "GET" && url.pathname === "/server-stats-monitor") {
     try {
-      const html = fs.readFileSync(path.join(TOOL_DIR, "server-stats.html"), "utf8");
+      const html = fs.readFileSync(
+        path.join(TOOL_DIR, "server-stats.html"),
+        "utf8",
+      );
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
       });
       return res.end(html);
     } catch (e) {
-      return jsonResponse(res, 500, { ok: false, error: "Could not load server-stats.html: " + e.message });
+      return jsonResponse(res, 500, {
+        ok: false,
+        error: "Could not load server-stats.html: " + e.message,
+      });
     }
   }
 
@@ -3304,8 +5449,6 @@ async function handleRequest(req, res) {
     });
   }
 
-
-
   // ── GET /failed-log ──────────────────────────────────────────────────────────
   // Downloads failed scan logs.
   // Query params:
@@ -3317,9 +5460,9 @@ async function handleRequest(req, res) {
   // FileMaker calls this as: /failed-log?format=txt&limit=200&since=<ISO>
   if (method === "GET" && url.pathname === "/failed-log") {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
-    const format  = (url.searchParams.get("format")   || "csv").toLowerCase();
-    const limit   = parseInt(url.searchParams.get("limit") || "500", 10);
-    const since   = (url.searchParams.get("since")   || "").trim();
+    const format = (url.searchParams.get("format") || "csv").toLowerCase();
+    const limit = parseInt(url.searchParams.get("limit") || "500", 10);
+    const since = (url.searchParams.get("since") || "").trim();
 
     if (batchId && !isSafeBatchId(batchId)) {
       return jsonError(res, 400, "Invalid batch_id");
@@ -3333,9 +5476,10 @@ async function handleRequest(req, res) {
 
     // Honour ?format=txt so FileMaker Insert from URL receives the
     // content-type it expects and does not stall on a CSV disposition.
-    const contentType = format === "txt"
-      ? "text/plain; charset=utf-8"
-      : "text/csv; charset=utf-8";
+    const contentType =
+      format === "txt"
+        ? "text/plain; charset=utf-8"
+        : "text/csv; charset=utf-8";
 
     if (res.writableEnded) return;
     res.writeHead(200, {
@@ -3372,8 +5516,13 @@ async function handleRequest(req, res) {
   // Clears queued/waiting multi batches from disk. Useful after API restart when
   // old queued batches should not remain visible in the domains monitor.
 
-  if ((method === "GET" || method === "DELETE") && url.pathname === "/queue/clear") {
-    const includeFinal = ["1", "true", "yes"].includes(String(url.searchParams.get("include_final") || "").toLowerCase());
+  if (
+    (method === "GET" || method === "DELETE") &&
+    url.pathname === "/queue/clear"
+  ) {
+    const includeFinal = ["1", "true", "yes"].includes(
+      String(url.searchParams.get("include_final") || "").toLowerCase(),
+    );
     const result = clearVisibleQueuedBatchFiles("manual", { includeFinal });
     return jsonResponse(res, result.ok ? 200 : 500, {
       ok: result.ok,
@@ -3387,7 +5536,10 @@ async function handleRequest(req, res) {
 
   // ── DELETE /jobs/stale ─────────────────────────────────────────────────────
 
-  if ((method === "DELETE" || method === "GET") && url.pathname === "/jobs/stale") {
+  if (
+    (method === "DELETE" || method === "GET") &&
+    url.pathname === "/jobs/stale"
+  ) {
     const hours = parseFloat(url.searchParams.get("hours") || "2");
     if (isNaN(hours) || hours <= 0) {
       return jsonResponse(res, 400, {
@@ -3408,55 +5560,75 @@ async function handleRequest(req, res) {
   // ── GET /jobs ──────────────────────────────────────────────────────────────
 
   if (method === "GET" && url.pathname === "/jobs") {
-    const jobs = [...activeJobs.values()].map((j) => {
-      if (j.type !== "multi") {
+    const jobs = [...activeJobs.values()]
+      .map((j) => {
+        if (j.type !== "multi") {
+          return {
+            key: j.key,
+            type: j.type,
+            domain: j.domain || null,
+            batchId: j.batchId || null,
+            jobId: j.jobId,
+            pid: j.pid,
+            startedAt: j.startedAt,
+            tools: j.tools || [],
+            domains: null,
+            domain_statuses: null,
+          };
+        }
+
+        const meta = getBatchMeta(j.batchId) || null;
+        if (meta && isFinalBatchStatus(meta.status)) return null;
+        const progress = readProgress(j.batchId);
+        const domains = domainsForBatch(j.batchId, j, meta);
+        const effectiveProgress = progressForBatchStatus(
+          meta,
+          progress,
+          domains,
+          true,
+        );
+        const resultSet = resultDomainsForBatch(j.batchId, meta);
+        const domainStatuses = withDomainProcessTimes(
+          j.batchId,
+          buildDomainStatusList(
+            domains,
+            effectiveProgress,
+            true,
+            meta,
+            resultSet,
+          ),
+          true,
+          meta,
+        );
+
         return {
           key: j.key,
           type: j.type,
-          domain: j.domain || null,
+          domain: null,
           batchId: j.batchId || null,
           jobId: j.jobId,
           pid: j.pid,
           startedAt: j.startedAt,
+          status: (meta && meta.status) || "RUNNING",
+          queuedAt: (meta && meta.enqueuedAt) || null,
           tools: j.tools || [],
-          domains: null,
-          domain_statuses: null,
+          domains,
+          domain_statuses: domainStatuses,
+          domain_count: domains.length || j.domainCount || 0,
+          queued_count: domainStatuses.filter(
+            (item) => item.status === "queued",
+          ).length,
+          processing_count: domainStatuses.filter(
+            (item) => item.status === "processing",
+          ).length,
+          done_count: domainStatuses.filter((item) => item.status === "done")
+            .length,
+          failed_count: domainStatuses.filter(
+            (item) => item.status === "failed",
+          ).length,
         };
-      }
-
-      const meta = getBatchMeta(j.batchId) || null;
-      if (meta && isFinalBatchStatus(meta.status)) return null;
-      const progress = readProgress(j.batchId);
-      const domains = domainsForBatch(j.batchId, j, meta);
-      const effectiveProgress = progressForBatchStatus(meta, progress, domains, true);
-      const resultSet = resultDomainsForBatch(j.batchId, meta);
-      const domainStatuses = withDomainProcessTimes(
-        j.batchId,
-        buildDomainStatusList(domains, effectiveProgress, true, meta, resultSet),
-        true,
-        meta
-      );
-
-      return {
-        key: j.key,
-        type: j.type,
-        domain: null,
-        batchId: j.batchId || null,
-        jobId: j.jobId,
-        pid: j.pid,
-        startedAt: j.startedAt,
-        status: (meta && meta.status) || "RUNNING",
-        queuedAt: meta && meta.enqueuedAt || null,
-        tools: j.tools || [],
-        domains,
-        domain_statuses: domainStatuses,
-        domain_count: domains.length || j.domainCount || 0,
-        queued_count: domainStatuses.filter((item) => item.status === "queued").length,
-        processing_count: domainStatuses.filter((item) => item.status === "processing").length,
-        done_count: domainStatuses.filter((item) => item.status === "done").length,
-        failed_count: domainStatuses.filter((item) => item.status === "failed").length,
-      };
-    }).filter(Boolean);
+      })
+      .filter(Boolean);
 
     // Also surface queued / waiting-gap multi batches that have been accepted by
     // /multi-enqueue + /multi-scan-start but have not spawned multi-audit.js yet.
@@ -3464,13 +5636,18 @@ async function handleRequest(req, res) {
     // the minutes gap clears and the multi batch actually starts.
     for (const { meta, domains } of listVisibleQueuedBatchMetas()) {
       const batchId = meta.batchId;
-      const progress = progressForBatchStatus(meta, readProgress(batchId), domains, false);
+      const progress = progressForBatchStatus(
+        meta,
+        readProgress(batchId),
+        domains,
+        false,
+      );
       const resultSet = resultDomainsForBatch(batchId, meta);
       const domainStatuses = withDomainProcessTimes(
         batchId,
         buildDomainStatusList(domains, progress, false, meta, resultSet),
         false,
-        meta
+        meta,
       );
 
       jobs.push({
@@ -3486,11 +5663,17 @@ async function handleRequest(req, res) {
         tools: meta.tools || [],
         domains,
         domain_statuses: domainStatuses,
-        domain_count: domains.length || meta.domainCount || meta.totalQueued || 0,
-        queued_count: domainStatuses.filter((item) => item.status === "queued").length,
-        processing_count: domainStatuses.filter((item) => item.status === "processing").length,
-        done_count: domainStatuses.filter((item) => item.status === "done").length,
-        failed_count: domainStatuses.filter((item) => item.status === "failed").length,
+        domain_count:
+          domains.length || meta.domainCount || meta.totalQueued || 0,
+        queued_count: domainStatuses.filter((item) => item.status === "queued")
+          .length,
+        processing_count: domainStatuses.filter(
+          (item) => item.status === "processing",
+        ).length,
+        done_count: domainStatuses.filter((item) => item.status === "done")
+          .length,
+        failed_count: domainStatuses.filter((item) => item.status === "failed")
+          .length,
       });
     }
 
@@ -3587,22 +5770,28 @@ async function handleRequest(req, res) {
         res.writeHead(200, {
           "Content-Type": "text/csv; charset=utf-8",
           "Access-Control-Allow-Origin": "*",
-          "Content-Disposition": "attachment; filename=latest.csv"
+          "Content-Disposition": "attachment; filename=latest.csv",
         });
         return res.end(content);
       } else {
-        return jsonResponse(res, 404, { ok: false, error: "latest.csv not found" });
+        return jsonResponse(res, 404, {
+          ok: false,
+          error: "latest.csv not found",
+        });
       }
     } else {
       if (fs.existsSync(latestJson)) {
         const content = fs.readFileSync(latestJson, "utf8");
         res.writeHead(200, {
           "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
+          "Access-Control-Allow-Origin": "*",
         });
         return res.end(content);
       } else {
-        return jsonResponse(res, 404, { ok: false, error: "latest.json not found" });
+        return jsonResponse(res, 404, {
+          ok: false,
+          error: "latest.json not found",
+        });
       }
     }
   }
@@ -3612,17 +5801,23 @@ async function handleRequest(req, res) {
   if (method === "GET" && url.pathname === "/latest/domain") {
     const domain = sanitizeDomain(url.searchParams.get("domain") || "");
     if (!domain) {
-      return jsonResponse(res, 400, { ok: false, error: "domain parameter required" });
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "domain parameter required",
+      });
     }
 
     try {
-      const { getDomainFromLatest } = require('./utils/latest-results');
+      const { getDomainFromLatest } = require("./utils/latest-results");
       const data = getDomainFromLatest(domain);
 
       if (data) {
         return jsonResponse(res, 200, { ok: true, data });
       } else {
-        return jsonResponse(res, 404, { ok: false, error: `Domain ${domain} not found in latest results` });
+        return jsonResponse(res, 404, {
+          ok: false,
+          error: `Domain ${domain} not found in latest results`,
+        });
       }
     } catch (err) {
       return jsonResponse(res, 500, { ok: false, error: err.message });
@@ -3633,30 +5828,37 @@ async function handleRequest(req, res) {
 
   if (method === "GET" && url.pathname === "/latest/stats") {
     try {
-      const { getAllLatestDomains } = require('./utils/latest-results');
+      const { getAllLatestDomains } = require("./utils/latest-results");
       const allDomains = getAllLatestDomains();
 
       const stats = {
         total_domains: allDomains.length,
-        last_updated: allDomains.length > 0 ?
-          allDomains.reduce((latest, d) => {
-            const date = new Date(d.Run_At);
-            return date > latest ? date : latest;
-          }, new Date(0)).toISOString() : null,
+        last_updated:
+          allDomains.length > 0
+            ? allDomains
+                .reduce((latest, d) => {
+                  const date = new Date(d.Run_At);
+                  return date > latest ? date : latest;
+                }, new Date(0))
+                .toISOString()
+            : null,
         ssl_grade_distribution: {},
         pagespeed_performance_distribution: {},
-        sucuri_status_distribution: {}
+        sucuri_status_distribution: {},
       };
 
       for (const domain of allDomains) {
         const sslGrade = domain.SSL_Grade || "N/A";
-        stats.ssl_grade_distribution[sslGrade] = (stats.ssl_grade_distribution[sslGrade] || 0) + 1;
+        stats.ssl_grade_distribution[sslGrade] =
+          (stats.ssl_grade_distribution[sslGrade] || 0) + 1;
 
         const pagespeedPerf = domain.PageSpeed_Performance || "N/A";
-        stats.pagespeed_performance_distribution[pagespeedPerf] = (stats.pagespeed_performance_distribution[pagespeedPerf] || 0) + 1;
+        stats.pagespeed_performance_distribution[pagespeedPerf] =
+          (stats.pagespeed_performance_distribution[pagespeedPerf] || 0) + 1;
 
         const sucuriStatus = domain.Sucuri_Overall || "N/A";
-        stats.sucuri_status_distribution[sucuriStatus] = (stats.sucuri_status_distribution[sucuriStatus] || 0) + 1;
+        stats.sucuri_status_distribution[sucuriStatus] =
+          (stats.sucuri_status_distribution[sucuriStatus] || 0) + 1;
       }
 
       return jsonResponse(res, 200, { ok: true, stats });
@@ -3672,11 +5874,11 @@ async function handleRequest(req, res) {
 
   if (method === "GET" && url.pathname === "/cleanup") {
     const hoursRaw = url.searchParams.get("hours");
-    const daysRaw  = url.searchParams.get("days");
+    const daysRaw = url.searchParams.get("days");
 
     const useHours = hoursRaw != null;
-    const hours    = useHours ? parseInt(hoursRaw, 10) : null;
-    const days     = useHours ? null : parseInt(daysRaw || "7", 10);
+    const hours = useHours ? parseInt(hoursRaw, 10) : null;
+    const days = useHours ? null : parseInt(daysRaw || "7", 10);
 
     if (useHours && (isNaN(hours) || hours <= 0)) {
       return jsonResponse(res, 400, {
@@ -3720,7 +5922,9 @@ async function handleRequest(req, res) {
             if (stat.mtimeMs < cutoff) {
               fs.rmSync(fullPath, { recursive: true, force: true });
               deleted.push(entry);
-              console.log(`[cleanup] Deleted batch folder (hours mode): ${entry}`);
+              console.log(
+                `[cleanup] Deleted batch folder (hours mode): ${entry}`,
+              );
             } else {
               skipped.push({ entry, reason: "newer than cutoff" });
             }
@@ -3768,7 +5972,10 @@ async function handleRequest(req, res) {
     const relPath = decodeURIComponent(url.pathname.slice("/images/".length));
     const parts = relPath.split("/").filter(Boolean);
     if (parts.length < 2) {
-      return jsonResponse(res, 400, { ok: false, error: "Expected /images/{domain}/{file}" });
+      return jsonResponse(res, 400, {
+        ok: false,
+        error: "Expected /images/{domain}/{file}",
+      });
     }
     const domainSegment = parts[0];
     const fileSegment = parts[parts.length - 1];
@@ -3776,24 +5983,47 @@ async function handleRequest(req, res) {
       return jsonResponse(res, 403, { ok: false, error: "Forbidden" });
     }
     const ext = path.extname(fileSegment).toLowerCase();
-    const mimeMap = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
+    const mimeMap = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+    };
     const contentType = mimeMap[ext] || "application/octet-stream";
     let absPath = null;
     try {
-      const entries = fs.readdirSync(SCAN_ROOT)
+      const entries = fs
+        .readdirSync(SCAN_ROOT)
         .filter((e) => /^\d{4}-\d{2}-\d{2}/.test(e))
         .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
       for (const entry of entries) {
-        const candidate = path.join(SCAN_ROOT, entry, domainSegment, "images", fileSegment);
-        if (fs.existsSync(candidate)) { absPath = candidate; break; }
+        const candidate = path.join(
+          SCAN_ROOT,
+          entry,
+          domainSegment,
+          "images",
+          fileSegment,
+        );
+        if (fs.existsSync(candidate)) {
+          absPath = candidate;
+          break;
+        }
       }
     } catch (_) {}
-    if (!absPath) return jsonResponse(res, 404, { ok: false, error: "Image not found" });
+    if (!absPath)
+      return jsonResponse(res, 404, { ok: false, error: "Image not found" });
     try {
       const buf = fs.readFileSync(absPath);
-      res.writeHead(200, { "Content-Type": contentType, "Content-Length": buf.length, "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" });
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": buf.length,
+        "Cache-Control": "no-cache",
+        "Access-Control-Allow-Origin": "*",
+      });
       res.end(buf);
-    } catch (err) { return jsonResponse(res, 500, { ok: false, error: err.message }); }
+    } catch (err) {
+      return jsonResponse(res, 500, { ok: false, error: err.message });
+    }
     return;
   }
 
@@ -3801,23 +6031,37 @@ async function handleRequest(req, res) {
   // Explicit batch path: /scan-image/{batchFolder}/{domain}/images/{file.png}
 
   if (method === "GET" && url.pathname.startsWith("/scan-image/")) {
-    const relPath = decodeURIComponent(url.pathname.slice("/scan-image/".length));
+    const relPath = decodeURIComponent(
+      url.pathname.slice("/scan-image/".length),
+    );
     const absPath = path.normalize(path.join(SCAN_ROOT, relPath));
     if (!absPath.startsWith(path.normalize(SCAN_ROOT) + path.sep)) {
       return jsonResponse(res, 403, { ok: false, error: "Forbidden" });
     }
-    if (!fs.existsSync(absPath)) return jsonResponse(res, 404, { ok: false, error: "Image not found" });
+    if (!fs.existsSync(absPath))
+      return jsonResponse(res, 404, { ok: false, error: "Image not found" });
     const ext = path.extname(absPath).toLowerCase();
-    const mimeMap = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
+    const mimeMap = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+    };
     const contentType = mimeMap[ext] || "application/octet-stream";
     try {
       const buf = fs.readFileSync(absPath);
-      res.writeHead(200, { "Content-Type": contentType, "Content-Length": buf.length, "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" });
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": buf.length,
+        "Cache-Control": "no-cache",
+        "Access-Control-Allow-Origin": "*",
+      });
       res.end(buf);
-    } catch (err) { return jsonResponse(res, 500, { ok: false, error: err.message }); }
+    } catch (err) {
+      return jsonResponse(res, 500, { ok: false, error: err.message });
+    }
     return;
   }
-
 
   // ── POST /multi-enqueue ────────────────────────────────────────────────────
   // Receives one chunk of domains from FileMaker and appends it to a queued
@@ -3838,24 +6082,32 @@ async function handleRequest(req, res) {
       const existingBatchId = String(parsed.batch_id || "").trim();
 
       if (existingBatchId && !isSafeBatchId(existingBatchId)) {
-        return jsonError(res, 400, "Invalid batch_id", { batch_id: existingBatchId });
+        return jsonError(res, 400, "Invalid batch_id", {
+          batch_id: existingBatchId,
+        });
       }
 
       const batchId = existingBatchId || createBatchId();
       const tools = normalizeSelectedTools(parsed.tools);
-      const enabledTools = tools.length ? tools : ALL_TOOL_KEYS;
+      const enabledTools = tools.length ? tools : DEFAULT_TOOL_KEYS;
       const scanSettings = parsed.scan_settings || {};
-      const serverName = String(parsed.server_name || scanSettings.server_name || "").trim();
+      const serverName = String(
+        parsed.server_name || scanSettings.server_name || "",
+      ).trim();
 
       if (!incomingDomains.length) {
-        return jsonError(res, 400, "No domains provided", { endpoint: "/multi-enqueue" });
+        return jsonError(res, 400, "No domains provided", {
+          endpoint: "/multi-enqueue",
+        });
       }
 
       const domainListFilePath = queuedDomainListPath(batchId);
       const existingMeta = getBatchMeta(batchId) || {};
       const existingQueuedDomains = readDomainsFromFile(domainListFilePath);
       const existingSet = new Set(existingQueuedDomains);
-      const newTargetsToAppend = incomingTargets.filter((item) => !existingSet.has(item.domain));
+      const newTargetsToAppend = incomingTargets.filter(
+        (item) => !existingSet.has(item.domain),
+      );
       const newDomainsToAppend = newTargetsToAppend.map((item) => item.domain);
       const newRawTargetsToAppend = newTargetsToAppend.map((item) => item.raw);
       const duplicateCount = incomingDomains.length - newDomainsToAppend.length;
@@ -3865,12 +6117,18 @@ async function handleRequest(req, res) {
         // Append only NEW normalized domains. This makes /multi-enqueue idempotent
         // when FileMaker retries a request or the web viewer refreshes while a queue is being built.
         if (newDomainsToAppend.length) {
-          fs.appendFileSync(domainListFilePath, newRawTargetsToAppend.join("\n") + "\n", "utf8");
+          fs.appendFileSync(
+            domainListFilePath,
+            newRawTargetsToAppend.join("\n") + "\n",
+            "utf8",
+          );
         } else if (!fs.existsSync(domainListFilePath)) {
           fs.writeFileSync(domainListFilePath, "", "utf8");
         }
       } catch (writeErr) {
-        console.error(`[multi-enqueue] write failed batch=${batchId}: ${writeErr.stack || writeErr.message}`);
+        console.error(
+          `[multi-enqueue] write failed batch=${batchId}: ${writeErr.stack || writeErr.message}`,
+        );
         return jsonError(res, 500, "Queue file write failed", {
           endpoint: "/multi-enqueue",
           batch_id: batchId,
@@ -3885,7 +6143,10 @@ async function handleRequest(req, res) {
       const meta = {
         ...existingMeta,
         batchId,
-        status: existingMeta.status && existingMeta.status !== "ERROR" ? existingMeta.status : "QUEUED",
+        status:
+          existingMeta.status && existingMeta.status !== "ERROR"
+            ? existingMeta.status
+            : "QUEUED",
         serverName,
         tools: enabledTools,
         scanSettings,
@@ -3902,7 +6163,9 @@ async function handleRequest(req, res) {
       try {
         saveBatchMetaStrict(meta);
       } catch (metaErr) {
-        console.error(`[multi-enqueue] meta save failed batch=${batchId}: ${metaErr.stack || metaErr.message}`);
+        console.error(
+          `[multi-enqueue] meta save failed batch=${batchId}: ${metaErr.stack || metaErr.message}`,
+        );
         return jsonError(res, 500, "Queue metadata write failed", {
           endpoint: "/multi-enqueue",
           batch_id: batchId,
@@ -3911,7 +6174,9 @@ async function handleRequest(req, res) {
         });
       }
 
-      console.log(`[multi-enqueue] batch_id=${batchId} +${newDomainsToAppend.length} new domains duplicates=${duplicateCount} total=${totalQueued}`);
+      console.log(
+        `[multi-enqueue] batch_id=${batchId} +${newDomainsToAppend.length} new domains duplicates=${duplicateCount} total=${totalQueued}`,
+      );
 
       return jsonResponse(res, 200, {
         ok: 1,
@@ -3940,37 +6205,65 @@ async function handleRequest(req, res) {
       try {
         parsed = await readJsonBody(req);
       } catch (e) {
-        return jsonError(res, 400, e.message, { endpoint: "/multi-scan-start" });
-      }
-
-      const batchId = String(parsed.batch_id || "").trim();
-      if (!batchId) return jsonError(res, 400, "Missing batch_id", { endpoint: "/multi-scan-start" });
-      if (!isSafeBatchId(batchId)) return jsonError(res, 400, "Invalid batch_id", { batch_id: batchId });
-
-      const meta = getBatchMeta(batchId);
-      if (!meta) return jsonError(res, 404, `Batch ${batchId} not found`, { batch_id: batchId });
-
-      if (meta.status === "RUNNING") {
-        return jsonError(res, 409, "Batch is already running", { batch_id: batchId });
-      }
-
-      const domainListFilePath = meta.domainListFile || queuedDomainListPath(batchId);
-      if (!domainListFilePath || !fs.existsSync(domainListFilePath)) {
-        return jsonError(res, 400, "Domain list file not found — enqueue domains first", {
-          batch_id: batchId,
-          file: domainListFilePath || null,
+        return jsonError(res, 400, e.message, {
+          endpoint: "/multi-scan-start",
         });
       }
 
+      const batchId = String(parsed.batch_id || "").trim();
+      if (!batchId)
+        return jsonError(res, 400, "Missing batch_id", {
+          endpoint: "/multi-scan-start",
+        });
+      if (!isSafeBatchId(batchId))
+        return jsonError(res, 400, "Invalid batch_id", { batch_id: batchId });
+
+      const meta = getBatchMeta(batchId);
+      if (!meta)
+        return jsonError(res, 404, `Batch ${batchId} not found`, {
+          batch_id: batchId,
+        });
+
+      if (meta.status === "RUNNING") {
+        return jsonError(res, 409, "Batch is already running", {
+          batch_id: batchId,
+        });
+      }
+
+      const domainListFilePath =
+        meta.domainListFile || queuedDomainListPath(batchId);
+      if (!domainListFilePath || !fs.existsSync(domainListFilePath)) {
+        return jsonError(
+          res,
+          400,
+          "Domain list file not found — enqueue domains first",
+          {
+            batch_id: batchId,
+            file: domainListFilePath || null,
+          },
+        );
+      }
+
       const actualQueued = countDomainsInFile(domainListFilePath);
-      const enabledTools = meta.tools || ALL_TOOL_KEYS;
+      const enabledTools = meta.tools || DEFAULT_TOOL_KEYS;
       const scanSettings = meta.scanSettings || {};
-      const minutesGap = parseFloat(scanSettings.minutes_gap || process.env.MINUTES_GAP || "0") || 0;
-      const maxConc = parseInt(scanSettings.max_concurrent || process.env.MAX_CONCURRENT || "3", 10) || 3;
-      const launchDelay = minutesGap > 0 ? Math.round(minutesGap * 60 * 1000) : 3000;
+      const minutesGap =
+        parseFloat(
+          scanSettings.minutes_gap || process.env.MINUTES_GAP || "0",
+        ) || 0;
+      const maxConc =
+        parseInt(
+          scanSettings.max_concurrent || process.env.MAX_CONCURRENT || "3",
+          10,
+        ) || 3;
+      const launchDelay =
+        minutesGap > 0 ? Math.round(minutesGap * 60 * 1000) : 3000;
       const effectiveMax = minutesGap > 0 ? 1 : Math.max(1, maxConc);
       const initialUsage = getUsage();
-      const initialGapMinutes = minutesUntilNextAllowed(minutesGap, initialUsage.last_scan_at);
+      const initialGapMinutes = minutesUntilNextAllowed(
+        minutesGap,
+        initialUsage.last_scan_at,
+      );
       const batchKey = `multi:${batchId}`;
       const queuedAt = nowIso();
 
@@ -3980,9 +6273,10 @@ async function handleRequest(req, res) {
       meta.queuedAt = queuedAt;
       meta.minutesGap = minutesGap;
       meta.minutesRemaining = initialGapMinutes;
-      meta.scheduledStartAt = initialGapMinutes > 0
-        ? new Date(Date.now() + (initialGapMinutes * 60000)).toISOString()
-        : queuedAt;
+      meta.scheduledStartAt =
+        initialGapMinutes > 0
+          ? new Date(Date.now() + initialGapMinutes * 60000).toISOString()
+          : queuedAt;
       meta.totalQueued = actualQueued;
       meta.domainCount = actualQueued;
       meta.domainListFile = domainListFilePath;
@@ -4011,26 +6305,32 @@ async function handleRequest(req, res) {
           // while this batch is waiting still resets the gap correctly.
           while (true) {
             const latestUsage = getUsage();
-            const waitMinutes = minutesUntilNextAllowed(minutesGap, latestUsage.last_scan_at);
+            const waitMinutes = minutesUntilNextAllowed(
+              minutesGap,
+              latestUsage.last_scan_at,
+            );
 
             if (waitMinutes <= 0) break;
 
             meta.status = "WAITING_GAP";
-            meta.waitingReason =
-              `Waiting ${waitMinutes} minute(s) for minutes gap (${minutesGap}) before starting.`;
+            meta.waitingReason = `Waiting ${waitMinutes} minute(s) for minutes gap (${minutesGap}) before starting.`;
             meta.minutesGap = minutesGap;
             meta.minutesRemaining = waitMinutes;
-            meta.scheduledStartAt = new Date(Date.now() + (waitMinutes * 60000)).toISOString();
+            meta.scheduledStartAt = new Date(
+              Date.now() + waitMinutes * 60000,
+            ).toISOString();
             meta.totalQueued = actualQueued;
             meta.domainCount = actualQueued;
             meta.domainListFile = domainListFilePath;
             saveBatchMeta(meta);
 
             console.log(
-              `[multi-scan-start] batch=${batchId} WAITING_GAP wait=${waitMinutes}m gap=${minutesGap}m`
+              `[multi-scan-start] batch=${batchId} WAITING_GAP wait=${waitMinutes}m gap=${minutesGap}m`,
             );
 
-            await new Promise((resolve) => setTimeout(resolve, waitMinutes * 60000));
+            await new Promise((resolve) =>
+              setTimeout(resolve, waitMinutes * 60000),
+            );
           }
 
           const startedAt = nowIso();
@@ -4077,12 +6377,17 @@ async function handleRequest(req, res) {
               stdio: ["ignore", "pipe", "pipe"],
             });
           } catch (spawnErr) {
-            console.error(`[multi-scan-start] spawn failed: ${spawnErr.stack || spawnErr.message}`);
+            console.error(
+              `[multi-scan-start] spawn failed: ${spawnErr.stack || spawnErr.message}`,
+            );
             meta.status = "ERROR";
             meta.error = spawnErr.message;
             meta.finishedAt = nowIso();
             saveBatchMeta(meta);
-            writeTextSafe(doneFlagPath(batchId), `done\ncode=-1\nsignal=spawn_failed\nfinishedAt=${nowIso()}\nerror=${spawnErr.message}`);
+            writeTextSafe(
+              doneFlagPath(batchId),
+              `done\ncode=-1\nsignal=spawn_failed\nfinishedAt=${nowIso()}\nerror=${spawnErr.message}`,
+            );
             return;
           }
 
@@ -4093,7 +6398,10 @@ async function handleRequest(req, res) {
           child.stdout.on("data", (c) => appendTextSafe(logFile, c.toString()));
           child.stderr.on("data", (c) => appendTextSafe(logFile, c.toString()));
           child.on("error", (childErr) => {
-            appendTextSafe(logFile, `[child-error] ${childErr.stack || childErr.message}\n`);
+            appendTextSafe(
+              logFile,
+              `[child-error] ${childErr.stack || childErr.message}\n`,
+            );
           });
 
           activeJobs.set(batchKey, {
@@ -4112,7 +6420,9 @@ async function handleRequest(req, res) {
           startBatchTimeWatcher(batchId);
 
           child.on("exit", (code, signal) => {
-            console.log(`[multi-scan-start] batch=${batchId} exit code=${code} signal=${signal}`);
+            console.log(
+              `[multi-scan-start] batch=${batchId} exit code=${code} signal=${signal}`,
+            );
             const jobBeforeDelete = activeJobs.get(batchKey) || null;
             activeJobs.delete(batchKey);
             const saved = getBatchMeta(batchId) || meta;
@@ -4123,9 +6433,18 @@ async function handleRequest(req, res) {
             saveBatchMeta(saved);
 
             if (code !== 0 || signal) {
-              const reason = inferFailureReasonFromLog(logFile, `Multi scan failed. code=${code} signal=${signal || ""}`);
+              const reason = inferFailureReasonFromLog(
+                logFile,
+                `Multi scan failed. code=${code} signal=${signal || ""}`,
+              );
               for (const d of domainsForBatch(batchId, null, saved) || []) {
-                appendFailedScanLog({ domain: d, reason, source: "multi", batchId, jobId: batchId });
+                appendFailedScanLog({
+                  domain: d,
+                  reason,
+                  source: "multi",
+                  batchId,
+                  jobId: batchId,
+                });
               }
             }
 
@@ -4138,9 +6457,13 @@ async function handleRequest(req, res) {
             }
           });
 
-          try { recordScan(actualQueued); } catch (_) {}
+          try {
+            recordScan(actualQueued);
+          } catch (_) {}
         } catch (asyncErr) {
-          console.error(`[multi-scan-start] async error batch=${batchId}: ${asyncErr.stack || asyncErr.message}`);
+          console.error(
+            `[multi-scan-start] async error batch=${batchId}: ${asyncErr.stack || asyncErr.message}`,
+          );
           try {
             const saved = getBatchMeta(batchId) || meta;
             saved.status = "ERROR";
@@ -4148,7 +6471,10 @@ async function handleRequest(req, res) {
             saved.finishedAt = nowIso();
             saveBatchMeta(saved);
             finalizeBatchTimeWatcher(batchId, saved);
-            writeTextSafe(doneFlagPath(batchId), `done\ncode=-1\nsignal=async_error\nfinishedAt=${nowIso()}\nerror=${asyncErr.message}`);
+            writeTextSafe(
+              doneFlagPath(batchId),
+              `done\ncode=-1\nsignal=async_error\nfinishedAt=${nowIso()}\nerror=${asyncErr.message}`,
+            );
           } catch (_) {}
         }
       });
@@ -4170,26 +6496,39 @@ async function handleRequest(req, res) {
     const batchId = (url.searchParams.get("batch_id") || "").trim();
 
     if (batchId) {
-      if (!isSafeBatchId(batchId)) return jsonError(res, 400, "Invalid batch_id", { batch_id: batchId });
+      if (!isSafeBatchId(batchId))
+        return jsonError(res, 400, "Invalid batch_id", { batch_id: batchId });
       const meta = getBatchMeta(batchId);
       const progress = readProgress(batchId);
-      if (!meta) return jsonResponse(res, 404, { ok: false, error: "Batch not found" });
+      if (!meta)
+        return jsonResponse(res, 404, { ok: false, error: "Batch not found" });
 
       const job = activeJobs.get(`multi:${batchId}`) || null;
       const domains = domainsForBatch(batchId, job, meta);
       const running = !!job;
       const resultSet = resultDomainsForBatch(batchId, meta);
-      const domainStatuses = withDomainProcessTimes(batchId, buildDomainStatusList(domains, progress, running, meta, resultSet), running, meta);
+      const domainStatuses = withDomainProcessTimes(
+        batchId,
+        buildDomainStatusList(domains, progress, running, meta, resultSet),
+        running,
+        meta,
+      );
 
       return jsonResponse(res, 200, {
         ok: 1,
         batch_id: batchId,
         status: meta.status || "UNKNOWN",
-        total_queued: domains.length || meta.totalQueued || meta.domainCount || 0,
-        completed: domainStatuses.filter((item) => item.status === "done").length,
-        failed_count: domainStatuses.filter((item) => item.status === "failed").length,
-        queued_count: domainStatuses.filter((item) => item.status === "queued").length,
-        processing_count: domainStatuses.filter((item) => item.status === "processing").length,
+        total_queued:
+          domains.length || meta.totalQueued || meta.domainCount || 0,
+        completed: domainStatuses.filter((item) => item.status === "done")
+          .length,
+        failed_count: domainStatuses.filter((item) => item.status === "failed")
+          .length,
+        queued_count: domainStatuses.filter((item) => item.status === "queued")
+          .length,
+        processing_count: domainStatuses.filter(
+          (item) => item.status === "processing",
+        ).length,
         running,
         started_at: meta.startedAt || null,
         finished_at: meta.finishedAt || null,
@@ -4228,30 +6567,60 @@ async function handleRequest(req, res) {
 
 const server = http.createServer((req, res) => {
   Promise.resolve(handleRequest(req, res)).catch((err) => {
-    console.error(`[api] unhandled request error ${req.method} ${req.url}: ${err.stack || err.message}`);
+    console.error(
+      `[api] unhandled request error ${req.method} ${req.url}: ${err.stack || err.message}`,
+    );
     if (!res.writableEnded) {
-      jsonError(res, 500, "Unhandled API request error", { detail: err.message });
+      jsonError(res, 500, "Unhandled API request error", {
+        detail: err.message,
+      });
     }
   });
 });
 
-server.requestTimeout = parseInt(process.env.API_REQUEST_TIMEOUT_MS || "120000", 10);
-server.headersTimeout = parseInt(process.env.API_HEADERS_TIMEOUT_MS || "125000", 10);
-server.keepAliveTimeout = parseInt(process.env.API_KEEPALIVE_TIMEOUT_MS || "5000", 10);
+server.requestTimeout = parseInt(
+  process.env.API_REQUEST_TIMEOUT_MS || "120000",
+  10,
+);
+server.headersTimeout = parseInt(
+  process.env.API_HEADERS_TIMEOUT_MS || "125000",
+  10,
+);
+server.keepAliveTimeout = parseInt(
+  process.env.API_KEEPALIVE_TIMEOUT_MS || "5000",
+  10,
+);
 
 process.on("unhandledRejection", (err) => {
-  console.error(`[api] unhandledRejection: ${err && err.stack ? err.stack : err}`);
+  console.error(
+    `[api] unhandledRejection: ${err && err.stack ? err.stack : err}`,
+  );
 });
 
 process.on("uncaughtException", (err) => {
-  console.error(`[api] uncaughtException: ${err && err.stack ? err.stack : err}`);
+  console.error(
+    `[api] uncaughtException: ${err && err.stack ? err.stack : err}`,
+  );
   // Do not process.exit() here. The request wrapper returns JSON where possible,
   // and systemd/pm2 can still restart the service if the process becomes unhealthy.
 });
 
-const startupQueueCleanup = clearVisibleQueuedBatchFiles("startup");
-if (startupQueueCleanup.cleared.length || startupQueueCleanup.errors.length) {
-  console.log(`[api] startup queued batch cleanup cleared=${startupQueueCleanup.cleared.length} errors=${startupQueueCleanup.errors.length}`);
+if (legacyRecovery && typeof legacyRecovery.markInterruptedJobsOnStartup === "function") {
+  try {
+    legacyRecovery.markInterruptedJobsOnStartup();
+  } catch (e) {
+    console.error("[api] legacy recovery startup failed: " + (e && e.stack ? e.stack : e.message));
+  }
+}
+
+const startupRecovery = markRecoverableBatchesAtStartup();
+if (
+  startupRecovery.marked.length ||
+  String(process.env.API_LOG_RECOVERY_STARTUP || "1") === "1"
+) {
+  console.log(
+    `[api] startup recovery marked_interrupted=${startupRecovery.marked.length} skipped=${startupRecovery.skipped.length}`,
+  );
 }
 
 server.listen(PORT, "0.0.0.0", () => {
@@ -4263,9 +6632,13 @@ server.listen(PORT, "0.0.0.0", () => {
 
 server.on("error", (err) => {
   if (err && err.code === "EADDRINUSE") {
-    console.error(`[api] EADDRINUSE: port ${PORT} is already in use. Do not start a second PM2 copy of api-server.js.`);
+    console.error(
+      `[api] EADDRINUSE: port ${PORT} is already in use. Do not start a second PM2 copy of api-server.js.`,
+    );
   } else {
-    console.error(`[api] server error: ${err && err.stack ? err.stack : err.message}`);
+    console.error(
+      `[api] server error: ${err && err.stack ? err.stack : err.message}`,
+    );
   }
   process.exit(1);
 });
@@ -4273,7 +6646,10 @@ server.on("error", (err) => {
 // Runs every hour automatically. Cleans batch folders, domain subfolders,
 // helper files, and api_batches meta older than PERIODIC_CLEANUP_HOURS (default 1h).
 // SAFE: active batch folders are always skipped even if older than the cutoff.
-const PERIODIC_CLEANUP_HOURS = parseInt(process.env.PERIODIC_CLEANUP_HOURS || "1", 10);
+const PERIODIC_CLEANUP_HOURS = parseInt(
+  process.env.PERIODIC_CLEANUP_HOURS || "1",
+  10,
+);
 const PERIODIC_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // every 1 hour
 
 /**
@@ -4285,21 +6661,27 @@ function getActiveBatchFolders() {
   try {
     const activeBatchIds = new Set();
     for (const [key] of activeJobs.entries()) {
-      if (key.startsWith("multi:"))  activeBatchIds.add(key.slice(6));
+      if (key.startsWith("multi:")) activeBatchIds.add(key.slice(6));
       if (key.startsWith("single:")) activeBatchIds.add(key.slice(7));
     }
     if (activeBatchIds.size === 0) return protected_;
 
     // Read latest_path_*.txt files to find actual folder paths
     for (const entry of fs.readdirSync(OUTPUT_DIR)) {
-      if (!entry.startsWith("latest_path_") || !entry.endsWith(".txt")) continue;
-      const matchesActive = [...activeBatchIds].some((id) => entry.includes(id));
+      if (!entry.startsWith("latest_path_") || !entry.endsWith(".txt"))
+        continue;
+      const matchesActive = [...activeBatchIds].some((id) =>
+        entry.includes(id),
+      );
       if (!matchesActive) continue;
       try {
-        const latestPath = fs.readFileSync(path.join(OUTPUT_DIR, entry), "utf8").trim();
+        const latestPath = fs
+          .readFileSync(path.join(OUTPUT_DIR, entry), "utf8")
+          .trim();
         if (!latestPath) continue;
         let p = latestPath;
-        while (p && p !== SCAN_ROOT && path.dirname(p) !== SCAN_ROOT) p = path.dirname(p);
+        while (p && p !== SCAN_ROOT && path.dirname(p) !== SCAN_ROOT)
+          p = path.dirname(p);
         if (path.dirname(p) === SCAN_ROOT) protected_.add(path.basename(p));
       } catch (_) {}
     }
@@ -4311,11 +6693,14 @@ function getActiveBatchFolders() {
         if (!fs.existsSync(metaPath)) continue;
         const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
         const root = meta.scanBatchPath || meta.batchRoot || meta.batchPath;
-        if (root && path.dirname(root) === SCAN_ROOT) protected_.add(path.basename(root));
+        if (root && path.dirname(root) === SCAN_ROOT)
+          protected_.add(path.basename(root));
       } catch (_) {}
     }
   } catch (e) {
-    console.error(`[periodic-cleanup] Error building active batch set: ${e.message}`);
+    console.error(
+      `[periodic-cleanup] Error building active batch set: ${e.message}`,
+    );
   }
   return protected_;
 }
@@ -4326,19 +6711,23 @@ function runPeriodicCleanup() {
   // 1. Batch folders under SCAN_ROOT — skip any still used by an active job
   const activeFolders = getActiveBatchFolders();
   if (activeFolders.size > 0) {
-    console.log(`[periodic-cleanup] Protecting active batch folders: ${[...activeFolders].join(", ")}`);
+    console.log(
+      `[periodic-cleanup] Protecting active batch folders: ${[...activeFolders].join(", ")}`,
+    );
   }
 
   let batchDeleted = 0;
   let batchSkipped = 0;
-  let batchErrors  = 0;
+  let batchErrors = 0;
   try {
     for (const entry of fs.readdirSync(SCAN_ROOT)) {
       if (!/^\d{4}-\d{2}-\d{2}/.test(entry)) continue;
 
       if (activeFolders.has(entry)) {
         batchSkipped++;
-        console.log(`[periodic-cleanup] Skipping active batch folder: ${entry}`);
+        console.log(
+          `[periodic-cleanup] Skipping active batch folder: ${entry}`,
+        );
         continue;
       }
 
@@ -4352,7 +6741,9 @@ function runPeriodicCleanup() {
         }
       } catch (e) {
         batchErrors++;
-        console.error(`[periodic-cleanup] Error deleting ${entry}: ${e.message}`);
+        console.error(
+          `[periodic-cleanup] Error deleting ${entry}: ${e.message}`,
+        );
       }
     }
   } catch (e) {
@@ -4363,7 +6754,7 @@ function runPeriodicCleanup() {
   //     domain-by-domain for large long-running batches.
   let domainDeleted = 0;
   let domainSkipped = 0;
-  let domainErrors  = 0;
+  let domainErrors = 0;
   for (const activeFolder of activeFolders) {
     const batchPath = path.join(SCAN_ROOT, activeFolder);
     try {
@@ -4372,40 +6763,64 @@ function runPeriodicCleanup() {
         try {
           const stat = fs.statSync(domainPath);
           if (!stat.isDirectory()) continue;
-          if (stat.mtimeMs >= cutoff) { domainSkipped++; continue; }
+          if (stat.mtimeMs >= cutoff) {
+            domainSkipped++;
+            continue;
+          }
 
-          const hasSummary   = fs.existsSync(path.join(domainPath, "summary.csv"));
-          const hasResultCsv = fs.existsSync(path.join(domainPath, `${entry}_results.csv`));
-          if (!hasSummary && !hasResultCsv) { domainSkipped++; continue; }
+          const hasSummary = fs.existsSync(
+            path.join(domainPath, "summary.csv"),
+          );
+          const hasResultCsv = fs.existsSync(
+            path.join(domainPath, `${entry}_results.csv`),
+          );
+          if (!hasSummary && !hasResultCsv) {
+            domainSkipped++;
+            continue;
+          }
 
           const imagesDir = path.join(domainPath, "images");
           if (fs.existsSync(imagesDir)) {
-            const remaining = fs.readdirSync(imagesDir)
-              .filter((f) => [".png",".jpg",".jpeg",".webp"].includes(path.extname(f).toLowerCase()));
+            const remaining = fs
+              .readdirSync(imagesDir)
+              .filter((f) =>
+                [".png", ".jpg", ".jpeg", ".webp"].includes(
+                  path.extname(f).toLowerCase(),
+                ),
+              );
             if (remaining.length > 0) {
               domainSkipped++;
-              console.log(`[periodic-cleanup] Skipping ${entry} — images not yet synced to ta1`);
+              console.log(
+                `[periodic-cleanup] Skipping ${entry} — images not yet synced to ta1`,
+              );
               continue;
             }
           }
 
           fs.rmSync(domainPath, { recursive: true, force: true });
           domainDeleted++;
-          console.log(`[periodic-cleanup] Deleted completed domain folder: ${activeFolder}/${entry}`);
+          console.log(
+            `[periodic-cleanup] Deleted completed domain folder: ${activeFolder}/${entry}`,
+          );
         } catch (e) {
           domainErrors++;
-          console.error(`[periodic-cleanup] Error processing domain ${entry}: ${e.message}`);
+          console.error(
+            `[periodic-cleanup] Error processing domain ${entry}: ${e.message}`,
+          );
         }
       }
     } catch (e) {
-      console.error(`[periodic-cleanup] Could not read active batch ${activeFolder}: ${e.message}`);
+      console.error(
+        `[periodic-cleanup] Could not read active batch ${activeFolder}: ${e.message}`,
+      );
     }
   }
 
   // 2. Helper files under OUTPUT_DIR.
   // Covers every per-job file type the API and multi-audit produce.
   // Explicitly excludes failed_scans.csv (the global log that should persist).
-  const HELPER_FILE_RE = /^(progress_.+\.(txt|log)|done_.+\.flag|latest_path_.+\.txt|checkpoint_.+\.json|failed_.{6,}\.csv|lock_.+\.pid)$/;
+  const HELPER_FILE_RE =
+    /^(progress_.+\.(txt|log)|done_.+\.flag|latest_path_.+\.txt|wp_.+\.json|checkpoint_.+\.json|failed_.{6,}\.csv|lock_.+\.pid)$/;
 
   let helperDeleted = 0;
   let helperErrors = 0;
@@ -4423,7 +6838,9 @@ function runPeriodicCleanup() {
         }
       } catch (e) {
         helperErrors++;
-        console.error(`[periodic-cleanup] Error deleting ${entry}: ${e.message}`);
+        console.error(
+          `[periodic-cleanup] Error deleting ${entry}: ${e.message}`,
+        );
       }
     }
   } catch (e) {
@@ -4447,12 +6864,16 @@ function runPeriodicCleanup() {
           }
         } catch (e) {
           metaErrors++;
-          console.error(`[periodic-cleanup] Error deleting meta ${entry}: ${e.message}`);
+          console.error(
+            `[periodic-cleanup] Error deleting meta ${entry}: ${e.message}`,
+          );
         }
       }
     }
   } catch (e) {
-    console.error(`[periodic-cleanup] Could not read API_BATCH_DIR: ${e.message}`);
+    console.error(
+      `[periodic-cleanup] Could not read API_BATCH_DIR: ${e.message}`,
+    );
   }
 
   // 5. Old Chrome BINARY cache cleanup — removes stale previous-version
@@ -4461,29 +6882,31 @@ function runPeriodicCleanup() {
   // Chrome process is still running from.
   let chromeBinDeleted = 0;
   let chromeBinFreedMB = 0;
-  let chromeBinErrors  = 0;
+  let chromeBinErrors = 0;
   try {
     const binCleanup = cleanupOldChromeBinaries();
     chromeBinDeleted = binCleanup.removed.length;
     chromeBinFreedMB = binCleanup.freedApproxMB;
-    chromeBinErrors  = binCleanup.errors.length;
+    chromeBinErrors = binCleanup.errors.length;
     if (chromeBinDeleted > 0 || chromeBinErrors > 0) {
       console.log(
         `[periodic-cleanup] Old Chrome binaries: ${chromeBinDeleted} removed ` +
-        `(~${chromeBinFreedMB}MB freed), ${chromeBinErrors} errors`
+          `(~${chromeBinFreedMB}MB freed), ${chromeBinErrors} errors`,
       );
     }
   } catch (e) {
-    console.error(`[periodic-cleanup] Chrome binary cleanup failed: ${e.message}`);
+    console.error(
+      `[periodic-cleanup] Chrome binary cleanup failed: ${e.message}`,
+    );
   }
 
   console.log(
     `[periodic-cleanup] Done — ` +
-    `scan folders: ${batchDeleted} deleted (${batchErrors} err) | ` +
-    `helper files: ${helperDeleted} deleted (${helperErrors} err) | ` +
-    `batch meta: ${metaDeleted} deleted (${metaErrors} err) | ` +
-    `chrome binaries: ${chromeBinDeleted} deleted (~${chromeBinFreedMB}MB, ${chromeBinErrors} err) | ` +
-    `cutoff: ${PERIODIC_CLEANUP_HOURS}h`
+      `scan folders: ${batchDeleted} deleted (${batchErrors} err) | ` +
+      `helper files: ${helperDeleted} deleted (${helperErrors} err) | ` +
+      `batch meta: ${metaDeleted} deleted (${metaErrors} err) | ` +
+      `chrome binaries: ${chromeBinDeleted} deleted (~${chromeBinFreedMB}MB, ${chromeBinErrors} err) | ` +
+      `cutoff: ${PERIODIC_CLEANUP_HOURS}h`,
   );
 }
 
@@ -4491,4 +6914,6 @@ function runPeriodicCleanup() {
 // then repeat every hour.
 runPeriodicCleanup();
 setInterval(runPeriodicCleanup, PERIODIC_CLEANUP_INTERVAL_MS);
-console.log(`[api] Periodic cleanup scheduled every 1h (cutoff: ${PERIODIC_CLEANUP_HOURS}h via PERIODIC_CLEANUP_HOURS env)`);
+console.log(
+  `[api] Periodic cleanup scheduled every 1h (cutoff: ${PERIODIC_CLEANUP_HOURS}h via PERIODIC_CLEANUP_HOURS env)`,
+);
